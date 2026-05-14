@@ -1,5 +1,5 @@
 import { InlineKeyboard, type Bot, type Context } from "grammy";
-import type { SlashCommandInfo } from "@mariozechner/pi-coding-agent";
+import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 
 import { formatError } from "../errors.js";
 import {
