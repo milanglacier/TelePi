@@ -6,7 +6,7 @@ TelePi is a Telegram bridge for the [Pi coding agent](https://github.com/badlogi
 
 - **Bi-directional hand-off**: Move sessions CLI → Telegram (`/handoff`) and back (`/handback`)
 - **Per-chat/topic sessions**: Every Telegram chat or forum topic gets its own Pi session, picker state, and retry history
-- **Voice messages**: Send a voice note or audio file and TelePi transcribes it into a Pi prompt
+- **Voice and image messages**: Send voice/audio for transcription, or photos/image documents as Pi image inputs
 - **Local or cloud transcription**: [Parakeet CoreML](https://github.com/badlogic/parakeet-coreml) on Apple Silicon, [Sherpa-ONNX Parakeet](https://k2-fsa.github.io/sherpa/onnx/) for Intel Macs (and as a CPU fallback), or OpenAI Whisper in the cloud
 - **Session tree navigation**: Browse, branch, and label your Pi session history with `/tree`, `/branch`, `/label`
 - **Cross-workspace sessions**: Browse and switch between sessions from any project
@@ -137,7 +137,18 @@ Sessions, inline keyboards, and `/retry` state are isolated per Telegram chat/to
 
 Any non-TelePi slash command that matches the active Pi session's discovered commands is forwarded into Pi unchanged. That means Telegram can now trigger file-based prompt templates (for example `/review`), skills (`/skill:browser-tools`), and compatible extension commands. Interactive extension commands can also open Telegram-native select/confirm/input dialogs while the command is running.
 
-## Voice Messages
+## External Prompt Inbox
+
+For cron jobs, mail filters, webhooks, or log watchers, keep the external trigger outside TelePi and write a `.txt` file into a prompt inbox instead:
+
+```env
+TELEPI_PROMPT_INBOX_DIR=/absolute/path/to/prompt-inbox
+TELEPI_PROMPT_INBOX_INTERVAL_MS=60000  # optional; default 60s, minimum 1s
+```
+
+When enabled, TelePi polls the directory, processes one `.txt` file at a time, sends its trimmed contents to the root chat for the first `TELEGRAM_ALLOWED_USER_IDS` entry, and deletes the file after accepting it. If that chat is already busy, files stay queued for the next poll. Empty `.txt` files are deleted to avoid loops; subdirectories and non-`.txt` files are ignored.
+
+## Voice and Image Messages
 
 Send any Telegram **voice message** or **audio file** and TelePi will transcribe it and feed the transcript straight into Pi as a text prompt.
 
@@ -163,6 +174,8 @@ TelePi tries backends in this order:
 3. **OpenAI Whisper** — cloud fallback
 
 The `/start` command shows which backends are currently active.
+
+Send a Telegram **photo** or **image document** to pass it to Pi as image input. Captions become the prompt; without a caption TelePi asks Pi to analyze the image.
 
 ### Installing Parakeet CoreML (local transcription on Apple Silicon)
 

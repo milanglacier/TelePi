@@ -1,8 +1,9 @@
-import { unlink } from "node:fs/promises";
+import { readFile, unlink } from "node:fs/promises";
 
 import { InlineKeyboard, Bot, type Context } from "grammy";
 import { autoRetry } from "@grammyjs/auto-retry";
 import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
+import type { ImageContent } from "@earendil-works/pi-ai";
 
 import type { TelePiConfig } from "./config.js";
 import { formatError } from "./errors.js";
@@ -23,9 +24,12 @@ import {
 import {
   buildChatScopedCommands,
   buildChatScopedCommandSignature,
+  getTelepiNativeCommandMenu,
   normalizeSlashCommand,
+  rewriteSlashCommandForTelegram,
   TELEPI_BOT_COMMANDS,
   TELEPI_LOCAL_COMMAND_NAMES,
+  type TelepiNativeCommandMenu,
 } from "./bot/slash-command.js";
 import {
   downloadTelegramFile,
@@ -37,10 +41,18 @@ import {
 } from "./bot/telegram-transport.js";
 import { createExtensionDialogManager } from "./bot/extension-dialogs.js";
 import { createBotChatState } from "./bot/chat-state.js";
+import { createChatTaskRunner } from "./bot/chat-task-runner.js";
+import {
+  COMMAND_MENU_CALLBACK_PREFIX,
+  isStaleCallbackQueryError,
+  logCallbackQueryError,
+} from "./bot/callback-query-logging.js";
 import { createPromptHandler } from "./bot/prompt-handler.js";
+import { startPromptInboxPolling } from "./bot/prompt-inbox.js";
 import { createCommandPickerHandlers, type PendingCommandPicker } from "./bot/command-picker.js";
 import { createBasicCommandHandlers } from "./bot/commands/basic.js";
 import { createSessionCommandHandlers } from "./bot/commands/sessions.js";
+import { createContextCommandHandlers } from "./bot/commands/context.js";
 import { createModelCommandHandlers } from "./bot/commands/model.js";
 import { createTreeCommandHandlers } from "./bot/commands/tree.js";
 import { registerTreeCallbacks, type PendingTreeView } from "./bot/tree-callbacks.js";
@@ -57,9 +69,51 @@ import { getVoiceBackendStatus, transcribeAudio } from "./voice.js";
 const EDIT_DEBOUNCE_MS = 1500;
 const TYPING_INTERVAL_MS = 4500;
 const EXTENSION_UI_TIMEOUT_MS = 60_000;
+const DEFAULT_IMAGE_PROMPT = "Please analyze this image.";
+
+const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".png": "image/png",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+  ".bmp": "image/bmp",
+  ".tiff": "image/tiff",
+  ".tif": "image/tiff",
+  ".heic": "image/heic",
+  ".heif": "image/heif",
+};
 
 type TelegramChatId = number | string;
 type ContextKey = string;
+
+function selectPhotoFileId(
+  photos: Array<{ file_id: string; file_size?: number }> | undefined,
+): string | undefined {
+  if (!photos || photos.length === 0) {
+    return undefined;
+  }
+
+  let selected = photos[photos.length - 1];
+  for (const candidate of photos) {
+    if (candidate.file_size !== undefined && (selected.file_size === undefined || candidate.file_size > selected.file_size)) {
+      selected = candidate;
+    }
+  }
+
+  return selected?.file_id;
+}
+
+function resolveImageMimeType(filePath: string, explicitMimeType?: string): string {
+  const normalizedMimeType = explicitMimeType?.trim().toLowerCase();
+  if (normalizedMimeType?.startsWith("image/")) {
+    return normalizedMimeType;
+  }
+
+  const extensionIndex = filePath.lastIndexOf(".");
+  const extension = extensionIndex >= 0 ? filePath.slice(extensionIndex).toLowerCase() : "";
+  return IMAGE_MIME_BY_EXTENSION[extension] ?? "image/jpeg";
+}
 
 export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegistry): Bot<Context> {
   const bot = new Bot<Context>(config.telegramBotToken);
@@ -75,8 +129,10 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
   const pendingTreeViews = new Map<ContextKey, PendingTreeView>();
   const pendingBranchButtons = new Map<ContextKey, KeyboardItem[]>();
   const pendingCommandPickers = new Map<ContextKey, PendingCommandPicker>();
+  const pendingCommandMenus = new Map<ContextKey, Map<string, { commandText: string }>>();
   const surfacedStartupErrorSignatures = new Map<ContextKey, string>();
   const chatScopedCommandSignatures = new Map<TelegramChatId, string>();
+  let nextCommandMenuToken = 0;
 
   const getContextKey = (target: PiSessionContext): ContextKey => getPiSessionContextKey(target);
   const getExistingSession = (target: PiSessionContext): PiSessionService | undefined => sessionRegistry.get(target);
@@ -89,6 +145,26 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
     editMessage: (target, messageId, text, options) => safeEditMessage(bot, target, messageId, text, options),
     defaultTimeoutMs: EXTENSION_UI_TIMEOUT_MS,
   });
+
+  const answerCallbackQuerySafely = async (
+    ctx: Context,
+    options?: Parameters<Context["answerCallbackQuery"]>[0],
+    logOptions?: { source?: string },
+  ): Promise<void> => {
+    const responseText = typeof options === "object" && options !== null && "text" in options
+      ? options.text
+      : undefined;
+
+    try {
+      await ctx.answerCallbackQuery(options);
+    } catch (error) {
+      logCallbackQueryError(ctx, error, {
+        phase: "answer",
+        source: logOptions?.source,
+        responseText,
+      });
+    }
+  };
 
   const buildKeyboard = (
     items: KeyboardItem[],
@@ -171,6 +247,44 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
     return keyboard;
   };
 
+  const createCommandMenuToken = (): string => {
+    nextCommandMenuToken += 1;
+    return nextCommandMenuToken.toString(36);
+  };
+
+  const openNativeCommandMenu = async (
+    ctx: Context,
+    target: PiSessionContext,
+    menu: TelepiNativeCommandMenu,
+  ): Promise<void> => {
+    const contextKey = getContextKey(target);
+    const keyboard = new InlineKeyboard();
+    const actions = new Map<string, { commandText: string }>();
+
+    menu.entries.forEach((entry, index) => {
+      const token = createCommandMenuToken();
+      actions.set(token, {
+        commandText: entry.commandText,
+      });
+      keyboard.text(entry.label, `${COMMAND_MENU_CALLBACK_PREFIX}${token}`);
+      if (index % 2 === 1 && index < menu.entries.length - 1) {
+        keyboard.row();
+      }
+    });
+
+    pendingCommandMenus.set(contextKey, actions);
+
+    await safeReply(
+      ctx,
+      `<b>${escapeHTML(menu.title)}</b>\nChoose a command to run:`,
+      {
+        fallbackText: `${menu.title}\nChoose a command to run:`,
+        replyMarkup: keyboard,
+      },
+      target,
+    );
+  };
+
   const clearContextPickers = (contextKey: ContextKey): void => {
     pendingSessionPicks.delete(contextKey);
     pendingSessionButtons.delete(contextKey);
@@ -180,6 +294,7 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
     pendingTreeViews.delete(contextKey);
     pendingBranchButtons.delete(contextKey);
     pendingCommandPickers.delete(contextKey);
+    pendingCommandMenus.delete(contextKey);
     surfacedStartupErrorSignatures.delete(contextKey);
   };
 
@@ -302,20 +417,54 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
     await next();
   });
 
+  const chatTaskRunner = createChatTaskRunner({
+    beginProcessing: (target, promptText) => chatState.beginProcessing(target, promptText),
+    endProcessing: (target) => chatState.endProcessing(target),
+    onTaskError: (error, target, promptText) => {
+      console.error(
+        "Detached prompt task failed",
+        JSON.stringify({
+          contextKey: getPiSessionContextKey(target),
+          promptText,
+          error: formatError(error),
+        }),
+      );
+    },
+  });
+
   const handleUserPrompt = createPromptHandler({
     bot,
     toolVerbosity: config.toolVerbosity,
     editDebounceMs: EDIT_DEBOUNCE_MS,
     typingIntervalMs: TYPING_INTERVAL_MS,
     isBusy,
-    beginProcessing: (target, promptText) => chatState.beginProcessing(target, promptText),
-    endProcessing: (target) => chatState.endProcessing(target),
+    taskRunner: chatTaskRunner,
     ensureActiveSession,
     syncChatScopedCommands,
     refreshChatScopedCommands,
     extensionDialogs,
     sendBusyReply,
   });
+
+  if (config.promptInboxDir) {
+    const target: PiSessionContext = { chatId: config.telegramAllowedUserIds[0] };
+    const stopPromptInboxPolling = startPromptInboxPolling({
+      inboxDir: config.promptInboxDir,
+      intervalMs: config.promptInboxIntervalMs,
+      target,
+      isBusy,
+      handlePrompt: async (promptTarget, prompt) =>
+        await handleUserPrompt({ api: bot.api } as Context, promptTarget, prompt),
+      onError: (error) => {
+        console.error("Prompt inbox polling failed", error);
+      },
+    });
+    const stopBot = bot.stop.bind(bot);
+    bot.stop = (...args: Parameters<typeof bot.stop>): ReturnType<typeof bot.stop> => {
+      stopPromptInboxPolling();
+      return stopBot(...args);
+    };
+  }
 
   const commandPickerHandlers = createCommandPickerHandlers({
     bot,
@@ -353,6 +502,12 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
     handleSessionCommand,
     handleRetryCommand,
   } = basicCommandHandlers;
+
+  const contextCommandHandlers = createContextCommandHandlers({
+    getExistingSession,
+    safeReply,
+  });
+  const { handleContextCommand } = contextCommandHandlers;
 
   const sessionCommandHandlers = createSessionCommandHandlers({
     getContextKey,
@@ -432,6 +587,9 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
         return;
       case "handback":
         await handleHandbackCommand(ctx, target);
+        return;
+      case "context":
+        await handleContextCommand(ctx, target);
         return;
       case "model":
         await handleModelCommand(ctx, target, ctx.message?.text);
@@ -530,6 +688,15 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
     await handleHandbackCommand(ctx, target);
   });
 
+  bot.command("context", async (ctx) => {
+    const target = getTelegramTarget(ctx);
+    if (!target) {
+      return;
+    }
+
+    await handleContextCommand(ctx, target);
+  });
+
   bot.command("model", async (ctx) => {
     const target = getTelegramTarget(ctx);
     if (!target) {
@@ -603,7 +770,7 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
       ctx.callbackQuery.message?.message_id,
       optionIndex,
     );
-    await ctx.answerCallbackQuery({ text: result.callbackText });
+    await answerCallbackQuerySafely(ctx, { text: result.callbackText }, { source: "extension.select" });
     await result.afterAnswer?.();
   });
 
@@ -621,7 +788,7 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
       ctx.callbackQuery.message?.message_id,
       answer === "yes",
     );
-    await ctx.answerCallbackQuery({ text: result.callbackText });
+    await answerCallbackQuerySafely(ctx, { text: result.callbackText }, { source: "extension.confirm" });
     await result.afterAnswer?.();
   });
 
@@ -637,8 +804,38 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
       dialogId,
       ctx.callbackQuery.message?.message_id,
     );
-    await ctx.answerCallbackQuery({ text: result.callbackText });
+    await answerCallbackQuerySafely(ctx, { text: result.callbackText }, { source: "extension.cancel" });
     await result.afterAnswer?.();
+  });
+
+  bot.callbackQuery(/^cmdm_([a-z0-9]+)$/, async (ctx) => {
+    const target = getTelegramTarget(ctx);
+    const token = ctx.match?.[1];
+    const logOptions = { source: "native.command-menu" };
+    if (!token) {
+      await answerCallbackQuerySafely(ctx, undefined, logOptions);
+      return;
+    }
+
+    if (!target) {
+      await answerCallbackQuerySafely(ctx, undefined, logOptions);
+      return;
+    }
+
+    const contextKey = getContextKey(target);
+    const action = pendingCommandMenus.get(contextKey)?.get(token);
+    if (!action) {
+      await answerCallbackQuerySafely(ctx, { text: "Expired, run the slash command again" }, logOptions);
+      return;
+    }
+
+    if (isBusy(target)) {
+      await answerCallbackQuerySafely(ctx, { text: "Wait for the current prompt to finish" }, logOptions);
+      return;
+    }
+
+    await answerCallbackQuerySafely(ctx, { text: `Running ${action.commandText}` }, logOptions);
+    await handleUserPrompt(ctx, target, action.commandText);
   });
 
   handlePageCallback(/^switch_page_(\d+)$/, "switch", pendingSessionButtons, "Expired, run /sessions again");
@@ -858,11 +1055,87 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
         return;
       }
 
-      await handleUserPrompt(ctx, target, normalizedSlashCommand.text, slashCommands);
+      const nativeCommandMenu = getTelepiNativeCommandMenu(normalizedSlashCommand, slashCommands);
+      if (nativeCommandMenu) {
+        await openNativeCommandMenu(ctx, target, nativeCommandMenu);
+        return;
+      }
+
+      const commandText = rewriteSlashCommandForTelegram(normalizedSlashCommand, slashCommands);
+      await handleUserPrompt(ctx, target, commandText, slashCommands);
       return;
     }
 
     await handleUserPrompt(ctx, target, userText);
+  });
+
+  bot.on(["message:photo", "message:document"], async (ctx) => {
+    const target = getTelegramTarget(ctx);
+    if (!target) {
+      return;
+    }
+
+    if (isBusy(target)) {
+      await sendBusyReply(ctx);
+      return;
+    }
+
+    const photoFileId = selectPhotoFileId(ctx.message.photo as Array<{ file_id: string; file_size?: number }> | undefined);
+    const documentMimeType = ctx.message.document?.mime_type;
+    const isImageDocument = documentMimeType?.toLowerCase().startsWith("image/") ?? false;
+    const documentFileId = isImageDocument ? ctx.message.document?.file_id : undefined;
+    const fileId = photoFileId ?? documentFileId;
+    if (!fileId) {
+      return;
+    }
+
+    chatState.beginTranscribing(target);
+    let tempFilePath: string | undefined;
+    let promptText: string | undefined;
+    let images: ImageContent[] | undefined;
+
+    try {
+      await sendChatAction(ctx.api, target, "typing");
+      tempFilePath = await downloadTelegramFile(ctx.api, config.telegramBotToken, fileId, {
+        fileKind: "image file",
+        tempFilePrefix: "telepi-image",
+      });
+
+      const imageBytes = await readFile(tempFilePath);
+      const imageMimeType = resolveImageMimeType(tempFilePath, documentMimeType);
+      promptText = ctx.message.caption?.trim() || DEFAULT_IMAGE_PROMPT;
+      const preview = truncateText(promptText.replace(/\s+/g, " "), 240);
+      images = [{
+        type: "image",
+        data: imageBytes.toString("base64"),
+        mimeType: imageMimeType,
+      }];
+
+      await safeReply(
+        ctx,
+        `🖼️ ${escapeHTML(preview)}`,
+        { fallbackText: `🖼️ ${preview}` },
+        target,
+      );
+    } catch (error) {
+      const failure = renderPrefixedError("Image handling failed", error, true);
+      await safeReply(ctx, failure.text, {
+        fallbackText: failure.fallbackText,
+        parseMode: failure.parseMode,
+      }, target);
+      return;
+    } finally {
+      chatState.endTranscribing(target);
+      if (tempFilePath) {
+        await unlink(tempFilePath).catch(() => {});
+      }
+    }
+
+    if (!promptText || !images) {
+      return;
+    }
+
+    await handleUserPrompt(ctx, target, promptText, undefined, images);
   });
 
   bot.on(["message:voice", "message:audio"], async (ctx) => {
@@ -928,6 +1201,11 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
   });
 
   bot.catch((error) => {
+    if (error.ctx?.callbackQuery && isStaleCallbackQueryError(error.error)) {
+      logCallbackQueryError(error.ctx, error.error, { phase: "handler" });
+      return;
+    }
+
     console.error("Telegram bot error:", formatError(error.error));
   });
 

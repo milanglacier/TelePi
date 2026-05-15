@@ -1,5 +1,5 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { unlink, writeFile } from "node:fs/promises";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { readFile, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { vi } from "vitest";
@@ -17,6 +17,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   return {
     ...actual,
+    readFile: vi.fn().mockResolvedValue(Buffer.from("image-bytes")),
     writeFile: vi.fn().mockResolvedValue(undefined),
     unlink: vi.fn().mockResolvedValue(undefined),
   };
@@ -34,6 +35,16 @@ vi.mock("../src/voice.js", () => ({
   _resetImportHook: vi.fn(),
 }));
 
+vi.mock("../src/bot/prompt-inbox.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/bot/prompt-inbox.js")>();
+  return {
+    ...actual,
+    startPromptInboxPolling: vi.fn(),
+  };
+});
+
+import type { SlashCommandInfo } from "@mariozechner/pi-coding-agent";
+
 import type { TelePiConfig } from "../src/config.js";
 import type {
   PiSessionCallbacks,
@@ -43,6 +54,7 @@ import type {
   PiSessionService,
 } from "../src/pi-session.js";
 import { createBot, registerCommands } from "../src/bot.js";
+import { startPromptInboxPolling } from "../src/bot/prompt-inbox.js";
 import { getAvailableBackends, transcribeAudio } from "../src/voice.js";
 
 type SwitchResult = Awaited<ReturnType<PiSessionService["switchSession"]>>;
@@ -94,12 +106,81 @@ function createConfig(overrides: Partial<TelePiConfig> = {}): TelePiConfig {
     piSessionPath: undefined,
     piModel: undefined,
     toolVerbosity: "summary",
+    promptInboxDir: undefined,
+    promptInboxIntervalMs: 60000,
     ...overrides,
   };
 }
 
 function makeContextKey(chatId: number | string = ALLOWED_CHAT_ID, messageThreadId?: number): string {
   return `${String(chatId)}::${messageThreadId ?? "root"}`;
+}
+
+function makeSlashCommand(name: string, overrides: Record<string, any> = {}): Record<string, any> {
+  return {
+    name,
+    description: `${name} command`,
+    source: "extension",
+    sourceInfo: {
+      source: "extension",
+      scope: "project",
+      path: `/ext/${name}.ts`,
+    },
+    ...overrides,
+  };
+}
+
+function makeTelepiBareNativeMenuSlashCommand(
+  name: string,
+  entries: Array<{ id: string; label: string; commandText: string }>,
+  overrides: Record<string, any> = {},
+): Record<string, any> {
+  return makeSlashCommand(name, {
+    integrations: {
+      telepi: {
+        bare: {
+          kind: "native-menu",
+          entries,
+        },
+      },
+    },
+    ...overrides,
+  });
+}
+
+async function loadPiCronSlashCommands(): Promise<SlashCommandInfo[]> {
+  const piCronExtensionPath = path.resolve(process.cwd(), "../../PiCron/src/extension/index.ts");
+  if (!existsSync(piCronExtensionPath)) {
+    return [
+      makeTelepiBareNativeMenuSlashCommand("cron", [
+        { id: "picron.cron.list", label: "List schedules", commandText: "/cron list" },
+        { id: "picron.cron.status", label: "Show status", commandText: "/cron status" },
+        { id: "picron.cron.add", label: "Add schedule", commandText: "/cron add" },
+        { id: "picron.cron.manage", label: "Manage schedules", commandText: "/cron manage" },
+      ], { description: "Manage PiCron schedules" }) as SlashCommandInfo,
+    ];
+  }
+
+  const { default: piCronExtension } = await import(piCronExtensionPath);
+  const slashCommands: SlashCommandInfo[] = [];
+
+  piCronExtension({
+    registerCommand: (name: string, options: Record<string, any>) => {
+      slashCommands.push({
+        name,
+        description: options.description,
+        integrations: options.integrations,
+        source: "extension",
+        sourceInfo: {
+          source: "extension",
+          scope: "project",
+          path: "../../PiCron/src/extension/index.ts",
+        } as any,
+      });
+    },
+  } as any);
+
+  return slashCommands;
 }
 
 function createMockPiSession(overrides: Partial<PiSessionService> = {}) {
@@ -265,6 +346,33 @@ function createMockPiSession(overrides: Partial<PiSessionService> = {}) {
       };
     }),
     dispose: vi.fn(),
+    getContextUsage: vi.fn().mockReturnValue({
+      tokens: 4500,
+      contextWindow: 128000,
+      percent: 3.52,
+    }),
+    getSessionStats: vi.fn().mockReturnValue({
+      userMessages: 5,
+      assistantMessages: 5,
+      toolCalls: 12,
+      toolResults: 12,
+      totalMessages: 20,
+      tokens: {
+        input: 40000,
+        output: 8000,
+        cacheRead: 2000,
+        cacheWrite: 1000,
+        total: 50000,
+      },
+      cost: 0.05,
+      contextUsage: {
+        tokens: 4500,
+        contextWindow: 128000,
+        percent: 3.52,
+      },
+      sessionFile: "/tmp/test.jsonl",
+      sessionId: "test-id",
+    }),
   } satisfies Partial<PiSessionService>;
 
   Object.assign(session, overrides);
@@ -473,6 +581,48 @@ function createVoiceUpdate(overrides: Record<string, any> = {}): any {
   };
 }
 
+function createPhotoUpdate(overrides: Record<string, any> = {}): any {
+  const { message: messageOverrides = {}, ...updateOverrides } = overrides;
+  return {
+    update_id: Math.floor(Math.random() * 1_000_000),
+    ...updateOverrides,
+    message: {
+      message_id: 1,
+      date: Math.floor(Date.now() / 1000),
+      chat: { id: ALLOWED_CHAT_ID, type: "private" },
+      from: { id: ALLOWED_USER_ID, is_bot: false, first_name: "Test" },
+      caption: "Check this graph",
+      photo: [
+        { file_id: "photo-small", file_unique_id: "photo-small-unique", width: 100, height: 100, file_size: 1000 },
+        { file_id: "photo-big", file_unique_id: "photo-big-unique", width: 500, height: 500, file_size: 5000 },
+      ],
+      ...messageOverrides,
+    },
+  };
+}
+
+function createDocumentUpdate(overrides: Record<string, any> = {}): any {
+  const { message: messageOverrides = {}, ...updateOverrides } = overrides;
+  return {
+    update_id: Math.floor(Math.random() * 1_000_000),
+    ...updateOverrides,
+    message: {
+      message_id: 1,
+      date: Math.floor(Date.now() / 1000),
+      chat: { id: ALLOWED_CHAT_ID, type: "private" },
+      from: { id: ALLOWED_USER_ID, is_bot: false, first_name: "Test" },
+      document: {
+        file_id: "document-image-id",
+        file_unique_id: "document-image-unique",
+        file_name: "diagram.png",
+        mime_type: "image/png",
+        file_size: 2048,
+      },
+      ...messageOverrides,
+    },
+  };
+}
+
 function createCallbackUpdate(data: string, overrides: Record<string, any> = {}): any {
   const { callback_query: callbackQueryOverrides = {}, ...updateOverrides } = overrides;
   const { message: callbackMessageOverrides = {}, ...callbackQueryRest } = callbackQueryOverrides;
@@ -611,6 +761,7 @@ describe("createBot", () => {
       backend: "openai",
       durationMs: 500,
     });
+    vi.mocked(readFile).mockResolvedValue(Buffer.from("image-bytes"));
     vi.mocked(writeFile).mockResolvedValue(undefined);
     vi.mocked(unlink).mockResolvedValue(undefined);
     vi.stubGlobal(
@@ -624,6 +775,35 @@ describe("createBot", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("starts prompt inbox polling when configured", () => {
+    setupBot({
+      configOverrides: {
+        promptInboxDir: "/tmp/telepi-inbox",
+        promptInboxIntervalMs: 15000,
+      },
+    });
+
+    expect(startPromptInboxPolling).toHaveBeenCalledWith(expect.objectContaining({
+      inboxDir: "/tmp/telepi-inbox",
+      intervalMs: 15000,
+      target: { chatId: ALLOWED_USER_ID },
+    }));
+  });
+
+  it("stops prompt inbox polling when the bot stops", () => {
+    const stopPolling = vi.fn();
+    vi.mocked(startPromptInboxPolling).mockReturnValue(stopPolling);
+    const { bot } = setupBot({
+      configOverrides: {
+        promptInboxDir: "/tmp/telepi-inbox",
+      },
+    });
+
+    bot.stop();
+
+    expect(stopPolling).toHaveBeenCalledTimes(1);
   });
 
   it("allows authorized users through the middleware and handles /start", async () => {
@@ -1730,7 +1910,14 @@ describe("createBot", () => {
     const { bot, pi, api } = setupBot({
       piSessionOverrides: {
         listSlashCommands: vi.fn().mockResolvedValue([
-          { name: "cron", description: "Manage PiCron schedules", source: "extension", path: "/ext/picron.ts" },
+          makeTelepiBareNativeMenuSlashCommand("cron", [
+            { id: "list", label: "📋 /cron list", commandText: "/cron list" },
+            { id: "status", label: "📊 /cron status", commandText: "/cron status" },
+            { id: "add", label: "➕ /cron add", commandText: "/cron add" },
+            { id: "manage", label: "🛠️ /cron manage", commandText: "/cron manage" },
+          ], {
+            description: "Manage PiCron schedules",
+          }),
         ]),
       },
     });
@@ -1747,6 +1934,291 @@ describe("createBot", () => {
     expect(pi.service.prompt).toHaveBeenCalledWith("/cron status");
     expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Daemon: running"))).toBe(true);
     expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Schedules: 1"))).toBe(true);
+  });
+
+  it("opens a native TelePi menu for bare slash commands declared via metadata", async () => {
+    const { bot, pi, api } = setupBot({
+      piSessionOverrides: {
+        listSlashCommands: vi.fn().mockResolvedValue([
+          makeTelepiBareNativeMenuSlashCommand("deploy", [
+            { id: "preview", label: "🧪 /deploy preview", commandText: "/deploy preview" },
+            { id: "status", label: "📊 /deploy status", commandText: "/deploy status" },
+            { id: "prod", label: "🚀 /deploy prod", commandText: "/deploy prod" },
+          ], {
+            description: "Deployment shortcuts",
+          }),
+        ]),
+      },
+    });
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/deploy" } }));
+
+    expect(pi.service.prompt).not.toHaveBeenCalled();
+    expect(api.sendMessage).toHaveBeenCalledTimes(1);
+    expect(String(api.sendMessage.mock.calls[0]?.[1])).toContain("/deploy");
+    expect(getReplyMarkupTexts(api)).toEqual([
+      "🧪 /deploy preview",
+      "📊 /deploy status",
+      "🚀 /deploy prod",
+    ]);
+    expect(getReplyMarkupData(api).every((callbackData) => /^cmdm_[a-z0-9]+$/.test(callbackData))).toBe(true);
+    expect(new Set(getReplyMarkupData(api)).size).toBe(3);
+    expect(getReplyMarkupData(api).every((callbackData) => callbackData.length < 64)).toBe(true);
+  });
+
+  it("drives bare /cron native menus from real PiCron extension metadata across repos", async () => {
+    const slashCommands = await loadPiCronSlashCommands();
+    const cronCommand = slashCommands.find((command) => command.name === "cron");
+
+    expect(cronCommand).toMatchObject({
+      name: "cron",
+      description: "Manage PiCron schedules",
+      integrations: {
+        telepi: {
+          bare: {
+            kind: "native-menu",
+            entries: [
+              { id: "picron.cron.list", label: "List schedules", commandText: "/cron list" },
+              { id: "picron.cron.status", label: "Show status", commandText: "/cron status" },
+              { id: "picron.cron.add", label: "Add schedule", commandText: "/cron add" },
+              { id: "picron.cron.manage", label: "Manage schedules", commandText: "/cron manage" },
+            ],
+          },
+        },
+      },
+    });
+
+    const { bot, pi, api } = setupBot({
+      piSessionOverrides: {
+        listSlashCommands: vi.fn().mockResolvedValue(slashCommands),
+      },
+    });
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/cron" } }));
+
+    expect(pi.service.prompt).not.toHaveBeenCalled();
+    expect(api.sendMessage).toHaveBeenCalledTimes(1);
+    expect(String(api.sendMessage.mock.calls[0]?.[1])).toContain("/cron");
+
+    const labels = getReplyMarkupTexts(api);
+    expect(labels).toEqual([
+      "List schedules",
+      "Show status",
+      "Add schedule",
+      "Manage schedules",
+    ]);
+
+    const showStatusCallbackData = getReplyMarkupData(api)[labels.indexOf("Show status")];
+    expect(showStatusCallbackData).toMatch(/^cmdm_[a-z0-9]+$/);
+
+    await bot.handleUpdate(createCallbackUpdate(showStatusCallbackData!));
+
+    expect(api.answerCallbackQuery).toHaveBeenCalledWith("cb_1", { text: "Running /cron status" });
+    expect(pi.service.prompt).toHaveBeenCalledWith("/cron status");
+  });
+
+  it("dispatches generic command-menu callbacks through the normal prompt flow", async () => {
+    const { bot, pi, api } = setupBot({
+      piSessionOverrides: {
+        listSlashCommands: vi.fn().mockResolvedValue([
+          makeTelepiBareNativeMenuSlashCommand("deploy", [
+            { id: "preview", label: "🧪 /deploy preview", commandText: "/deploy preview" },
+            { id: "status", label: "📊 /deploy status", commandText: "/deploy status" },
+          ]),
+        ]),
+      },
+    });
+    const promptMock = pi.service.prompt as ReturnType<typeof vi.fn>;
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/deploy" } }));
+    const callbackData = getReplyMarkupData(api)[1]!;
+
+    promptMock.mockImplementation(async (promptText: string) => {
+      expect(api.answerCallbackQuery).toHaveBeenCalledWith("cb_1", { text: "Running /deploy status" });
+      expect(promptText).toBe("/deploy status");
+      pi.emitAgentEnd();
+    });
+
+    await bot.handleUpdate(createCallbackUpdate(callbackData));
+
+    expect(api.answerCallbackQuery).toHaveBeenCalledWith("cb_1", { text: "Running /deploy status" });
+    expect(pi.service.prompt).toHaveBeenCalledWith("/deploy status");
+  });
+
+  it("detaches command-menu prompt callbacks so extension dialog callbacks stay responsive", async () => {
+    let resolvePrompt!: () => void;
+    const { bot, pi, api } = setupBot({
+      piSessionOverrides: {
+        listSlashCommands: vi.fn().mockResolvedValue([
+          makeTelepiBareNativeMenuSlashCommand("deploy", [
+            { id: "manage", label: "🛠️ /deploy manage", commandText: "/deploy manage" },
+            { id: "status", label: "📊 /deploy status", commandText: "/deploy status" },
+          ]),
+        ]),
+      },
+    });
+    const promptMock = pi.service.prompt as ReturnType<typeof vi.fn>;
+
+    promptMock.mockImplementation(async (promptText: string) => {
+      expect(promptText).toBe("/deploy manage");
+      const choice = await pi.getExtensionBindings()?.uiContext?.select("Pick one", ["Alpha", "Beta"]);
+      pi.emitTextDelta(`picked ${choice}`);
+      await new Promise<void>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      pi.emitAgentEnd();
+    });
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/deploy" } }));
+    const callbackData = getReplyMarkupData(api)[0]!;
+
+    let callbackHandled = false;
+    const pendingCallback = bot.handleUpdate(createCallbackUpdate(callbackData));
+    void pendingCallback.then(() => {
+      callbackHandled = true;
+    });
+
+    await nextTick();
+
+    expect(api.answerCallbackQuery).toHaveBeenCalledWith("cb_1", { text: "Running /deploy manage" });
+    expect(pi.service.prompt).toHaveBeenCalledWith("/deploy manage");
+    expect(callbackHandled).toBe(true);
+
+    const selectCallback = api.sendMessage.mock.calls
+      .flatMap((call) => call[2]?.reply_markup?.inline_keyboard?.flat().map((button: any) => button.callback_data) ?? [])
+      .find((data) => /^ui_sel_[a-z0-9]+_1$/.test(data ?? ""));
+    expect(selectCallback).toBeTruthy();
+
+    api.answerCallbackQuery.mockClear();
+    await bot.handleUpdate(
+      createCallbackUpdate(selectCallback!, {
+        callback_query: {
+          message: {
+            message_id: 2,
+          },
+        },
+      }),
+    );
+
+    expect(api.answerCallbackQuery).toHaveBeenCalledWith("cb_1", { text: "Selected Beta" });
+    expect(api.editMessageText.mock.calls.some((call) => String(call[2]).includes("Selected: Beta"))).toBe(true);
+
+    resolvePrompt();
+    await nextTick();
+
+    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("picked Beta"))).toBe(true);
+  });
+
+  it("detaches text prompt handling from the Telegram update lifetime", async () => {
+    let resolvePrompt!: () => void;
+    const { bot, pi } = setupBot({
+      piSessionOverrides: {
+        prompt: vi.fn().mockImplementation(
+          () =>
+            new Promise<void>((resolve) => {
+              resolvePrompt = resolve;
+            }),
+        ),
+      },
+    });
+
+    let updateHandled = false;
+    const pendingUpdate = bot.handleUpdate(createTestUpdate({ message: { text: "hello" } }));
+    void pendingUpdate.then(() => {
+      updateHandled = true;
+    });
+
+    await nextTick();
+
+    expect(updateHandled).toBe(true);
+    expect(pi.service.prompt).toHaveBeenCalledWith("hello");
+
+    resolvePrompt();
+    await nextTick();
+  });
+
+  it("fails fast for generic command-menu callbacks while a prompt is already in flight", async () => {
+    let resolvePrompt!: () => void;
+    const { bot, pi, api } = setupBot({
+      piSessionOverrides: {
+        listSlashCommands: vi.fn().mockResolvedValue([
+          makeTelepiBareNativeMenuSlashCommand("deploy", [
+            { id: "preview", label: "🧪 /deploy preview", commandText: "/deploy preview" },
+            { id: "status", label: "📊 /deploy status", commandText: "/deploy status" },
+          ]),
+        ]),
+        prompt: vi.fn().mockImplementation(
+          () =>
+            new Promise<void>((resolve) => {
+              resolvePrompt = resolve;
+            }),
+        ),
+      },
+    });
+    const promptMock = pi.service.prompt as ReturnType<typeof vi.fn>;
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/deploy" } }));
+    const callbackData = getReplyMarkupData(api)[0]!;
+
+    const pending = bot.handleUpdate(createTestUpdate({ message: { text: "hello" } }));
+    await nextTick();
+
+    expect(promptMock).toHaveBeenCalledTimes(1);
+
+    api.answerCallbackQuery.mockClear();
+    const sendMessageCalls = api.sendMessage.mock.calls.length;
+
+    await bot.handleUpdate(createCallbackUpdate(callbackData));
+
+    expect(api.answerCallbackQuery).toHaveBeenCalledWith("cb_1", {
+      text: "Wait for the current prompt to finish",
+    });
+    expect(api.answerCallbackQuery).not.toHaveBeenCalledWith("cb_1", { text: "Running /deploy preview" });
+    expect(api.sendMessage).toHaveBeenCalledTimes(sendMessageCalls);
+    expect(promptMock).toHaveBeenCalledTimes(1);
+
+    resolvePrompt();
+    await pending;
+  });
+
+  it("falls back to forwarding bare slash commands when native menu metadata is missing or invalid", async () => {
+    for (const slashCommands of [
+      [makeSlashCommand("deploy", { description: "Deploy app" })],
+      [
+        makeTelepiBareNativeMenuSlashCommand("deploy", [
+          { id: "preview", label: "", commandText: "/deploy preview" },
+        ]),
+      ],
+    ]) {
+      const { bot, pi } = setupBot({
+        piSessionOverrides: {
+          listSlashCommands: vi.fn().mockResolvedValue(slashCommands),
+        },
+      });
+
+      await bot.handleUpdate(createTestUpdate({ message: { text: "/deploy" } }));
+
+      expect(pi.service.prompt).toHaveBeenCalledWith("/deploy");
+    }
+  });
+
+  it("passes schedule-like plain text through unchanged instead of applying cron-specific rewrites", async () => {
+    const { bot, pi } = setupBot({
+      piSessionOverrides: {
+        listSlashCommands: vi.fn().mockResolvedValue([
+          makeTelepiBareNativeMenuSlashCommand("cron", [
+            { id: "picron.cron.list", label: "List schedules", commandText: "/cron list" },
+            { id: "picron.cron.status", label: "Show status", commandText: "/cron status" },
+          ], {
+            description: "Manage PiCron schedules",
+          }),
+        ]),
+      },
+    });
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "list schedules" } }));
+
+    expect(pi.service.prompt).toHaveBeenCalledWith("list schedules");
   });
 
   it("drives a /cron add style multi-step extension dialog flow through TelePi replies", async () => {
@@ -1798,6 +2270,7 @@ describe("createBot", () => {
 
     await bot.handleUpdate(createTestUpdate({ message: { text: "session.jsonl" } }));
     await pending;
+    await nextTick();
 
     expect(pi.service.prompt).toHaveBeenCalledWith("/cron add");
     expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Created schedule Daily review"))).toBe(true);
@@ -2224,6 +2697,90 @@ describe("createBot", () => {
     expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("picked Beta"))).toBe(true);
   });
 
+  it("supports extension select dialogs when forum callbacks omit the topic thread id", async () => {
+    const topicKey = makeContextKey(ALLOWED_CHAT_ID, 101);
+    const { bot, api, registry } = setupBot({
+      perContextSessionOverrides: {
+        [topicKey]: {
+          listSlashCommands: vi.fn().mockResolvedValue([
+            { name: "pick", description: "Pick an option", source: "extension", path: "/ext/pick.ts" },
+          ]),
+        },
+      },
+    });
+
+    await registry.registry.getOrCreate({ chatId: ALLOWED_CHAT_ID, messageThreadId: 101 });
+    const topicPi = registry.getSession(ALLOWED_CHAT_ID, 101)!;
+    const promptMock = topicPi.service.prompt as ReturnType<typeof vi.fn>;
+    promptMock.mockImplementation(async () => {
+      const choice = await topicPi.getExtensionBindings()?.uiContext?.select("Pick one", ["Alpha", "Beta"]);
+      topicPi.emitTextDelta(`picked ${choice}`);
+      topicPi.emitAgentEnd();
+    });
+
+    const pending = bot.handleUpdate(
+      createTestUpdate({
+        message: {
+          text: "/pick",
+          chat: { id: ALLOWED_CHAT_ID, type: "supergroup" },
+          message_thread_id: 101,
+        },
+      }),
+    );
+    await nextTick();
+
+    const selectCallback = api.sendMessage.mock.calls
+      .flatMap((call) => call[2]?.reply_markup?.inline_keyboard?.flat().map((button: any) => button.callback_data) ?? [])
+      .find((data) => /^ui_sel_[a-z0-9]+_1$/.test(data ?? ""));
+    expect(selectCallback).toBeTruthy();
+
+    await bot.handleUpdate(
+      createCallbackUpdate(selectCallback!, {
+        callback_query: {
+          message: {
+            chat: { id: ALLOWED_CHAT_ID, type: "supergroup" },
+          },
+        },
+      }),
+    );
+    await pending;
+
+    expect(api.answerCallbackQuery).toHaveBeenCalledWith("cb_1", { text: "Selected Beta" });
+    expect(api.sendMessage.mock.calls.some(
+      (call) => String(call[1]).includes("picked Beta") && call[2]?.message_thread_id === 101,
+    )).toBe(true);
+  });
+
+  it("still resolves extension dialog callbacks when Telegram rejects answerCallbackQuery", async () => {
+    const { bot, pi, api } = setupBot({
+      piSessionOverrides: {
+        listSlashCommands: vi.fn().mockResolvedValue([
+          { name: "pick", description: "Pick an option", source: "extension", path: "/ext/pick.ts" },
+        ]),
+      },
+    });
+
+    const promptMock = pi.service.prompt as ReturnType<typeof vi.fn>;
+    promptMock.mockImplementation(async () => {
+      const choice = await pi.getExtensionBindings()?.uiContext?.select("Pick one", ["Alpha", "Beta"]);
+      pi.emitTextDelta(`picked ${choice}`);
+      pi.emitAgentEnd();
+    });
+
+    const pending = bot.handleUpdate(createTestUpdate({ message: { text: "/pick" } }));
+    await nextTick();
+
+    const selectCallback = getReplyMarkupData(api, 0).find((data) => /^ui_sel_[a-z0-9]+_1$/.test(data ?? ""));
+    expect(selectCallback).toBeTruthy();
+
+    api.answerCallbackQuery.mockRejectedValueOnce(new Error("query too old"));
+    await bot.handleUpdate(createCallbackUpdate(selectCallback!));
+    await pending;
+
+    expect(api.editMessageText.mock.calls.some((call) => String(call[2]).includes("Selected: Beta"))).toBe(true);
+    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("picked Beta"))).toBe(true);
+  });
+
   it("supports extension confirm dialogs through Telegram callbacks", async () => {
     const { bot, pi, api } = setupBot({
       piSessionOverrides: {
@@ -2250,6 +2807,43 @@ describe("createBot", () => {
     await bot.handleUpdate(createCallbackUpdate(confirmCallback!));
     await pending;
 
+    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("confirmed true"))).toBe(true);
+  });
+
+  it("supports extension confirm dialogs when Telegram omits callback message ids", async () => {
+    const { bot, pi, api } = setupBot({
+      piSessionOverrides: {
+        listSlashCommands: vi.fn().mockResolvedValue([
+          { name: "confirm", description: "Confirm action", source: "extension", path: "/ext/confirm.ts" },
+        ]),
+      },
+    });
+
+    const promptMock = pi.service.prompt as ReturnType<typeof vi.fn>;
+    promptMock.mockImplementation(async () => {
+      const confirmed = await pi.getExtensionBindings()?.uiContext?.confirm("Confirm deploy", "Ship it?");
+      pi.emitTextDelta(`confirmed ${confirmed}`);
+      pi.emitAgentEnd();
+    });
+
+    const pending = bot.handleUpdate(createTestUpdate({ message: { text: "/confirm" } }));
+    await nextTick();
+
+    const confirmCallback = getReplyMarkupData(api, 0).find((data) => data?.endsWith("_yes"));
+    expect(confirmCallback).toBeTruthy();
+
+    await bot.handleUpdate(
+      createCallbackUpdate(confirmCallback!, {
+        callback_query: {
+          message: {
+            message_id: undefined,
+          },
+        },
+      }),
+    );
+    await pending;
+
+    expect(api.answerCallbackQuery).toHaveBeenCalledWith("cb_1", { text: "Confirmed" });
     expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("confirmed true"))).toBe(true);
   });
 
@@ -2385,6 +2979,73 @@ describe("createBot", () => {
     expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Voice response"))).toBe(true);
     expect(writeFile).toHaveBeenCalledTimes(1);
     expect(unlink).toHaveBeenCalledTimes(1);
+  });
+
+  it("handles photo messages by sending caption + image input to Pi", async () => {
+    const { bot, pi, api } = setupBot();
+    api.getFile.mockImplementation(async (fileId: string) => ({
+      file_id: fileId,
+      file_path: fileId === "photo-big" ? "images/photo-big.jpg" : "images/photo-small.jpg",
+    }));
+
+    const promptMock = pi.service.prompt as ReturnType<typeof vi.fn>;
+    promptMock.mockImplementation(async () => {
+      pi.emitTextDelta("Image response");
+      pi.emitAgentEnd();
+    });
+
+    await bot.handleUpdate(createPhotoUpdate());
+
+    expect(api.getFile).toHaveBeenCalledWith("photo-big");
+    expect(pi.service.prompt).toHaveBeenCalledWith("Check this graph", [
+      {
+        type: "image",
+        data: Buffer.from("image-bytes").toString("base64"),
+        mimeType: "image/jpeg",
+      },
+    ]);
+    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("🖼️ Check this graph"))).toBe(true);
+    expect(unlink).toHaveBeenCalledTimes(1);
+  });
+
+  it("handles image documents and ignores non-image documents", async () => {
+    const { bot, pi, api } = setupBot();
+    api.getFile.mockImplementation(async (fileId: string) => ({
+      file_id: fileId,
+      file_path: "docs/diagram.png",
+    }));
+
+    const promptMock = pi.service.prompt as ReturnType<typeof vi.fn>;
+    promptMock.mockImplementation(async () => {
+      pi.emitTextDelta("Document image response");
+      pi.emitAgentEnd();
+    });
+
+    await bot.handleUpdate(createDocumentUpdate({ message: { caption: undefined } }));
+
+    expect(pi.service.prompt).toHaveBeenCalledWith("Please analyze this image.", [
+      {
+        type: "image",
+        data: Buffer.from("image-bytes").toString("base64"),
+        mimeType: "image/png",
+      },
+    ]);
+    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Please analyze this image."))).toBe(true);
+
+    await bot.handleUpdate(createDocumentUpdate({
+      message: {
+        document: {
+          file_id: "document-text-id",
+          file_unique_id: "document-text-unique",
+          file_name: "notes.txt",
+          mime_type: "text/plain",
+          file_size: 128,
+        },
+      },
+    }));
+
+    expect(api.getFile).not.toHaveBeenCalledWith("document-text-id");
+    expect(pi.service.prompt).toHaveBeenCalledTimes(1);
   });
 
   it("blocks voice messages while processing and reports transcription failures", async () => {
@@ -2933,6 +3594,7 @@ describe("createBot", () => {
       { command: "abort", description: "Cancel current operation" },
       { command: "session", description: "Current session details" },
       { command: "sessions", description: "List and switch sessions (or /sessions <path|id>)" },
+      { command: "context", description: "Show context usage and session stats" },
       { command: "model", description: "Switch AI model" },
       { command: "tree", description: "View and navigate the session tree" },
       { command: "branch", description: "Navigate to a tree entry (/branch <id>)" },
@@ -3084,5 +3746,67 @@ describe("createBot", () => {
 
     expect(api.editMessageText.mock.calls.at(-1)?.[2]).toContain("Failed:");
     expect(api.editMessageText.mock.calls.at(-1)?.[2]).toContain("create exploded");
+  });
+
+  it("shows context usage with /context command", async () => {
+    const { bot, api } = setupBot({
+      piSessionOverrides: {
+        getContextUsage: vi.fn().mockReturnValue({
+          tokens: 15000,
+          contextWindow: 128000,
+          percent: 11.72,
+        }),
+        getSessionStats: vi.fn().mockReturnValue({
+          userMessages: 10,
+          assistantMessages: 10,
+          toolCalls: 25,
+          toolResults: 25,
+          totalMessages: 40,
+          tokens: {
+            input: 120000,
+            output: 30000,
+            cacheRead: 5000,
+            cacheWrite: 2000,
+            total: 157000,
+          },
+          cost: 0.12,
+          contextUsage: {
+            tokens: 15000,
+            contextWindow: 128000,
+            percent: 11.72,
+          },
+          sessionFile: "/tmp/session.jsonl",
+          sessionId: "test-session",
+        }),
+      },
+    });
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/context" } }));
+
+    const sentText = String(api.sendMessage.mock.calls[0]?.[1]);
+    expect(sentText).toContain("Context Usage");
+    expect(sentText).toContain("15,000");
+    expect(sentText).toContain("128,000");
+    expect(sentText).toContain("11.72%");
+    expect(sentText).toContain("Session Stats");
+    expect(sentText).toContain("10");
+    expect(sentText).toContain("user");
+    expect(sentText).toContain("25");
+    expect(sentText).toContain("$0.1200");
+  });
+
+  it("shows 'no active session' with /context when session is missing", async () => {
+    const { bot, api } = setupBot({
+      piSessionOverrides: {
+        hasActiveSession: vi.fn().mockReturnValue(false),
+        getContextUsage: vi.fn().mockReturnValue(undefined),
+        getSessionStats: vi.fn().mockReturnValue(undefined),
+      },
+    });
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/context" } }));
+
+    const sentText = String(api.sendMessage.mock.calls[0]?.[1]);
+    expect(sentText).toContain("No active session");
   });
 });

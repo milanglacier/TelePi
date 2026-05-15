@@ -17,7 +17,7 @@ export function createBasicCommandHandlers(deps: {
     target: PiSessionContext,
     userText: string,
     preloadedSlashCommands?: SlashCommandInfo[],
-  ) => Promise<void>;
+  ) => Promise<boolean>;
   getLastPrompt: (target: PiSessionContext) => string | undefined;
   extensionDialogs: { cancelPending: (target: PiSessionContext) => Promise<boolean> };
   getVoiceBackendStatus: () => Promise<{ backends: string[]; warning?: string }>;

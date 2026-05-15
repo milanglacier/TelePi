@@ -13,14 +13,16 @@ import {
   SettingsManager,
   type AgentSession,
   type AgentSessionRuntime,
+  type ContextUsage,
   type CreateAgentSessionRuntimeFactory,
   type ResourceDiagnostic,
   type ResourceLoader,
   type SessionEntry,
+  type SessionStats,
   type SlashCommandInfo,
 } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, ImageContent, Model } from "@earendil-works/pi-ai";
 
 import type { TelePiConfig } from "./config.js";
 import { createProviderResponseNoticeExtension } from "./provider-response-notices.js";
@@ -33,6 +35,7 @@ import {
   resolveSessionPathForRuntime,
   resolveWorkspacePathForRuntime,
 } from "./pi-session-paths.js";
+import { describeEntry, type SessionTreeNodeLike as SessionTreeNode } from "./tree.js";
 
 /**
  * Default timeout (seconds) for bash commands in TelePi sessions.
@@ -42,7 +45,9 @@ import {
  * The LLM can still pass an explicit `timeout` to override this per-call.
  */
 const DEFAULT_BASH_TIMEOUT_SECONDS = 120;
-import { describeEntry, type SessionTreeNodeLike as SessionTreeNode } from "./tree.js";
+const TELEPI_LAUNCHD_LABEL = "com.telepi";
+const TELEPI_SELF_MANAGEMENT_ERROR =
+  `Blocked TelePi self-management command. launchctl commands targeting ${TELEPI_LAUNCHD_LABEL} cannot run from inside a TelePi session. Manage the launchd service from a separate shell instead.`;
 
 export interface PiSessionCallbacks {
   onTextDelta: (delta: string) => void;
@@ -122,7 +127,8 @@ interface PiSessionHandle {
 }
 
 /**
- * Patch the bash tool on a live session to enforce a default timeout.
+ * Patch the bash tool on a live session to enforce a default timeout and guard
+ * against TelePi restarting or managing its own launchd service.
  *
  * The Pi SDK bash tool has no default timeout — if the LLM omits `timeout`,
  * commands run indefinitely. In TelePi's headless context this causes hangs
@@ -132,6 +138,226 @@ interface PiSessionHandle {
  * SDK only reads tool names from that option and rebuilds implementations
  * internally. Instead, we patch the live tool on `session.agent.state` after creation.
  */
+type BashToolArgs = { command: string; timeout?: number };
+
+function splitShellCommandSegments(command: string): string[] {
+  const segments: string[] = [];
+  let current = "";
+  let quote: "\"" | "'" | undefined;
+  let escaped = false;
+
+  const pushSegment = () => {
+    const trimmed = current.trim();
+    if (trimmed) {
+      segments.push(trimmed);
+    }
+    current = "";
+  };
+
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index];
+
+    if (escaped) {
+      current += character;
+      escaped = false;
+      continue;
+    }
+
+    if (character === "\\" && quote !== "'") {
+      current += character;
+      escaped = true;
+      continue;
+    }
+
+    if (quote) {
+      current += character;
+      if (character === quote) {
+        quote = undefined;
+      }
+      continue;
+    }
+
+    if (character === "\"" || character === "'") {
+      current += character;
+      quote = character;
+      continue;
+    }
+
+    if (character === ";" || character === "\n") {
+      pushSegment();
+      continue;
+    }
+
+    if (character === "&") {
+      pushSegment();
+      if (command[index + 1] === "&") {
+        index += 1;
+      }
+      continue;
+    }
+
+    if (character === "|") {
+      pushSegment();
+      if (command[index + 1] === "|") {
+        index += 1;
+      }
+      continue;
+    }
+
+    current += character;
+  }
+
+  pushSegment();
+  return segments;
+}
+
+function tokenizeShellCommand(command: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: "\"" | "'" | undefined;
+  let escaped = false;
+
+  const pushToken = () => {
+    if (current) {
+      tokens.push(current);
+      current = "";
+    }
+  };
+
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index];
+
+    if (escaped) {
+      current += character;
+      escaped = false;
+      continue;
+    }
+
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+
+    if (quote) {
+      if (character === quote) {
+        quote = undefined;
+        continue;
+      }
+      current += character;
+      continue;
+    }
+
+    if (character === "\"" || character === "'") {
+      quote = character;
+      continue;
+    }
+
+    if (/\s/.test(character)) {
+      pushToken();
+      continue;
+    }
+
+    current += character;
+  }
+
+  pushToken();
+  return tokens;
+}
+
+function getExecutableName(token: string): string {
+  return path.posix.basename(token.replace(/^[()]+|[()]+$/g, "")).toLowerCase();
+}
+
+function isEnvironmentAssignment(token: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(token);
+}
+
+function stripCommandPrefixes(tokens: string[]): string[] {
+  let index = 0;
+
+  while (index < tokens.length) {
+    const token = tokens[index];
+    const executableName = getExecutableName(token);
+
+    if (isEnvironmentAssignment(token)) {
+      index += 1;
+      continue;
+    }
+
+    if (executableName === "env") {
+      index += 1;
+      while (index < tokens.length && (tokens[index].startsWith("-") || isEnvironmentAssignment(tokens[index]))) {
+        index += 1;
+      }
+      continue;
+    }
+
+    if (executableName === "sudo" || executableName === "command" || executableName === "nohup") {
+      index += 1;
+      while (index < tokens.length && tokens[index].startsWith("-")) {
+        index += 1;
+      }
+      continue;
+    }
+
+    break;
+  }
+
+  return tokens.slice(index);
+}
+
+function extractShellWrapperCommand(tokens: string[]): string | undefined {
+  for (let index = 1; index < tokens.length; index += 1) {
+    const token = tokens[index];
+
+    if (token === "-c") {
+      return tokens[index + 1];
+    }
+
+    if (/^-[A-Za-z]*c$/.test(token)) {
+      return tokens[index + 1];
+    }
+
+    if (token.startsWith("-c") && token.length > 2) {
+      return token.slice(2);
+    }
+  }
+
+  return undefined;
+}
+
+function isBlockedTelepiSelfManagementCommand(command: string): boolean {
+  for (const segment of splitShellCommandSegments(command)) {
+    const tokens = stripCommandPrefixes(tokenizeShellCommand(segment));
+    const executable = tokens[0];
+    if (!executable) {
+      continue;
+    }
+
+    const executableName = getExecutableName(executable);
+    if (executableName === "launchctl") {
+      return tokens.some((token) => token.toLowerCase().includes(TELEPI_LAUNCHD_LABEL));
+    }
+
+    if (["bash", "sh", "zsh", "dash", "fish", "ksh"].includes(executableName)) {
+      const nestedCommand = extractShellWrapperCommand(tokens);
+      if (nestedCommand && isBlockedTelepiSelfManagementCommand(nestedCommand)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function getBlockedBashCommandReason(command: string): string | undefined {
+  if (isBlockedTelepiSelfManagementCommand(command)) {
+    return TELEPI_SELF_MANAGEMENT_ERROR;
+  }
+
+  return undefined;
+}
+
 function patchBashTimeout(session: AgentSession): void {
   const tools = session.agent.state.tools;
   const patched = tools.map((tool) => {
@@ -160,6 +386,11 @@ function patchBashTimeout(session: AgentSession): void {
 function withDefaultBashTimeout<T>(params: T): T {
   if (!isBashToolInput(params)) {
     return params;
+  }
+
+  const blockedReason = getBlockedBashCommandReason(params.command);
+  if (blockedReason) {
+    throw new Error(blockedReason);
   }
 
   return {
@@ -347,8 +578,13 @@ export function subscribeToSession(
   });
 }
 
-export async function promptSession(session: AgentSession, text: string): Promise<void> {
+export async function promptSession(session: AgentSession, text: string, images?: ImageContent[]): Promise<void> {
   try {
+    if (images && images.length > 0) {
+      await session.prompt(text, { images });
+      return;
+    }
+
     await session.prompt(text);
   } catch (error) {
     throw wrapError("Pi session prompt failed", error);
@@ -431,8 +667,9 @@ export class PiSessionService {
     };
   }
 
-  async prompt(text: string): Promise<void> {
-    await promptSession(this.getSession(), text);
+  async prompt(text: string, images?: ImageContent[]): Promise<void> {
+    this.reloadAuthStorage();
+    await promptSession(this.getSession(), text, images);
   }
 
   async bindExtensions(bindings: Parameters<AgentSession["bindExtensions"]>[0]): Promise<void> {
@@ -463,6 +700,14 @@ export class PiSessionService {
       return;
     }
     await this.handle.runtime.session.abort();
+  }
+
+  getContextUsage(): ContextUsage | undefined {
+    return this.handle?.runtime.session.getContextUsage();
+  }
+
+  getSessionStats(): SessionStats | undefined {
+    return this.handle?.runtime.session.getSessionStats();
   }
 
   async listAllSessions(): Promise<
@@ -528,6 +773,7 @@ export class PiSessionService {
   }
 
   async listModels(showAll = false): Promise<PiSessionModelOption[]> {
+    this.reloadAuthStorage();
     const session = this.getSession();
     const currentModel = session.model;
     const availableModels = this.getModelRegistry().getAvailable();
@@ -556,6 +802,7 @@ export class PiSessionService {
   }
 
   async setModel(provider: string, modelId: string, thinkingLevel?: ThinkingLevel): Promise<string> {
+    this.reloadAuthStorage();
     const session = this.getSession();
     const modelRegistry = this.getModelRegistry();
     const model = modelRegistry.find(provider, modelId);
@@ -882,6 +1129,10 @@ export class PiSessionService {
       throw new Error("Pi session is not initialized");
     }
     return this.handle;
+  }
+
+  private reloadAuthStorage(): void {
+    this.getHandle().runtime.services.authStorage.reload();
   }
 
   private getModelRegistry(): ModelRegistry {

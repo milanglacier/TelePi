@@ -18,6 +18,7 @@ const mockState = vi.hoisted(() => {
   const createdSessions: Array<{ session: any; options: any }> = [];
   const createdRuntimes: Array<{ runtime: any; options: any }> = [];
   const modelRegistryInstances: any[] = [];
+  const authStorageInstances: any[] = [];
   const sessionSubscribers = new WeakMap<object, (event: any) => void>();
   const sessionPathWorkspaces = new Map<string, string>();
   const resolvedSessionPaths = new Map<string, string>();
@@ -312,7 +313,14 @@ const mockState = vi.hoisted(() => {
   ]);
 
   const AuthStorage = {
-    create: vi.fn().mockReturnValue({ kind: "auth-storage" }),
+    create: vi.fn().mockImplementation(() => {
+      const instance = {
+        kind: "auth-storage",
+        reload: vi.fn(),
+      };
+      authStorageInstances.push(instance);
+      return instance;
+    }),
   };
 
   const ModelRegistry = {
@@ -359,6 +367,7 @@ const mockState = vi.hoisted(() => {
     createdSessions,
     createdRuntimes,
     modelRegistryInstances,
+    authStorageInstances,
     createAgentSession,
     createAgentSessionRuntime,
     createAgentSessionServices,
@@ -387,6 +396,7 @@ const mockState = vi.hoisted(() => {
       modelRegistryInstances.length = 0;
       sessionPathWorkspaces.clear();
       resolvedSessionPaths.clear();
+      authStorageInstances.length = 0;
       createAgentSession.mockClear();
       createAgentSessionRuntime.mockClear();
       createAgentSessionServices.mockClear();
@@ -443,6 +453,8 @@ describe("PiSessionService", () => {
     piSessionPath: undefined,
     piModel: undefined,
     toolVerbosity: "summary",
+    promptInboxDir: undefined,
+    promptInboxIntervalMs: 60000,
     ...overrides,
   });
 
@@ -450,12 +462,15 @@ describe("PiSessionService", () => {
     mockState.reset();
   });
 
+  const getPatchedBashTool = (session: any) =>
+    session.agent.state.tools.find((tool: any) => tool.name === "bash");
+
   it("creates a session service and initializes the Pi session runtime", async () => {
     const service = await PiSessionService.create(createConfig());
 
     expect(mockState.AuthStorage.create).toHaveBeenCalledTimes(1);
     expect(mockState.ModelRegistry.create).toHaveBeenCalledTimes(1);
-    expect(mockState.ModelRegistry.create).toHaveBeenCalledWith({ kind: "auth-storage" });
+    expect(mockState.ModelRegistry.create).toHaveBeenCalledWith(expect.objectContaining({ kind: "auth-storage" }));
     expect(mockState.createAgentSessionRuntime).toHaveBeenCalledWith(
       expect.any(Function),
       expect.objectContaining({
@@ -467,7 +482,7 @@ describe("PiSessionService", () => {
     expect(mockState.createAgentSessionServices).toHaveBeenCalledWith(
       expect.objectContaining({
         cwd: "/workspace/base",
-        authStorage: { kind: "auth-storage" },
+        authStorage: expect.objectContaining({ kind: "auth-storage" }),
       }),
     );
     expect(mockState.createCodingTools).toHaveBeenCalledWith("/workspace/base");
@@ -577,6 +592,29 @@ describe("PiSessionService", () => {
       undefined,
       undefined,
     );
+  });
+
+  it("rejects TelePi launchctl self-management commands before they execute", async () => {
+    await PiSessionService.create(createConfig());
+    const currentSession = mockState.createdSessions[0]?.session;
+    const originalBashTool = mockState.createdSessions[0]?.options?.bashExecute;
+    const patchedBashTool = getPatchedBashTool(currentSession);
+
+    const blockedCommands = [
+      "launchctl kickstart -k gui/$UID/com.telepi",
+      "echo ready & launchctl kickstart -k gui/$UID/com.telepi",
+      "sudo -E launchctl kickstart -k gui/$UID/com.telepi",
+      '(launchctl kickstart -k gui/$UID/com.telepi)',
+      'bash -c "launchctl kickstart -k gui/$UID/com.telepi"',
+    ];
+
+    for (const [index, command] of blockedCommands.entries()) {
+      expect(() => patchedBashTool.execute(`tool-${index + 1}`, { command })).toThrow(
+        "Blocked TelePi self-management command. launchctl commands targeting com.telepi cannot run from inside a TelePi session.",
+      );
+    }
+
+    expect(originalBashTool).not.toHaveBeenCalled();
   });
 
   it("adds the provider-response notice extension factory to session services", async () => {
@@ -1908,6 +1946,32 @@ describe("PiSessionService", () => {
     expect(onToolUpdate).toHaveBeenCalledWith("tool-1", '{\n  "ok": true\n}');
     expect(onToolEnd).toHaveBeenCalledWith("tool-1", false);
     expect(onAgentEnd).toHaveBeenCalledTimes(1);
+  });
+
+  it("reloads auth storage before prompting", async () => {
+    const service = await PiSessionService.create(createConfig());
+
+    await service.prompt("hello");
+
+    expect(mockState.authStorageInstances[0]?.reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes image attachments through when prompting", async () => {
+    const service = await PiSessionService.create(createConfig());
+    const currentSession = mockState.createdSessions[0]?.session;
+    const images = [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }] as any;
+
+    await service.prompt("hello", images);
+
+    expect(currentSession.prompt).toHaveBeenCalledWith("hello", { images });
+  });
+
+  it("reloads auth storage before listing models", async () => {
+    const service = await PiSessionService.create(createConfig());
+
+    await service.listModels();
+
+    expect(mockState.authStorageInstances[0]?.reload).toHaveBeenCalledTimes(1);
   });
 
   it("wraps prompt errors with a helpful message", async () => {

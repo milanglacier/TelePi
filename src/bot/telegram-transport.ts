@@ -19,7 +19,7 @@ export type TextOptions = {
   replyMarkup?: InlineKeyboard;
 };
 
-const MAX_AUDIO_FILE_SIZE = 25 * 1024 * 1024; // 25 MB
+const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25 MB
 
 export function getTelegramTarget(ctx: Context): PiSessionContext | undefined {
   const chatId = ctx.chat?.id;
@@ -129,25 +129,37 @@ export async function sendChatAction(
   });
 }
 
-export async function downloadTelegramFile(api: Context["api"], token: string, fileId: string): Promise<string> {
+export async function downloadTelegramFile(
+  api: Context["api"],
+  token: string,
+  fileId: string,
+  options: {
+    maxFileSizeBytes?: number;
+    fileKind?: string;
+    tempFilePrefix?: string;
+  } = {},
+): Promise<string> {
   const file = await api.getFile(fileId);
   if (!file.file_path) {
     throw new Error("Telegram did not return a file path");
   }
 
-  if (file.file_size && file.file_size > MAX_AUDIO_FILE_SIZE) {
-    throw new Error(`Audio file too large (${Math.round(file.file_size / 1024 / 1024)} MB, max 25 MB)`);
+  const maxFileSizeBytes = options.maxFileSizeBytes ?? MAX_FILE_SIZE;
+  if (file.file_size && file.file_size > maxFileSizeBytes) {
+    const label = options.fileKind ?? "File";
+    throw new Error(`${label} too large (${Math.round(file.file_size / 1024 / 1024)} MB, max ${Math.round(maxFileSizeBytes / 1024 / 1024)} MB)`);
   }
 
   const url = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
   const response = await fetch(url);
   if (!response.ok) {
-    throw new Error(`Failed to download voice file: ${response.status}`);
+    throw new Error(`Failed to download ${options.fileKind ?? "voice file"}: ${response.status}`);
   }
 
   const buffer = Buffer.from(await response.arrayBuffer());
   const extension = path.extname(file.file_path) || ".ogg";
-  const tempPath = path.join(tmpdir(), `telepi-voice-${randomUUID()}${extension}`);
+  const tempPrefix = options.tempFilePrefix ?? "telepi-voice";
+  const tempPath = path.join(tmpdir(), `${tempPrefix}-${randomUUID()}${extension}`);
   await writeFile(tempPath, buffer);
   return tempPath;
 }

@@ -119,7 +119,7 @@ export function createCommandPickerHandlers(deps: {
     target: PiSessionContext,
     userText: string,
     preloadedSlashCommands?: SlashCommandInfo[],
-  ) => Promise<void>;
+  ) => Promise<boolean>;
   runTelePiPickerCommand: (ctx: Context, target: PiSessionContext, command: string) => Promise<void>;
   safeReply: (ctx: Context, text: string, options?: TextOptions, target?: PiSessionContext) => Promise<void>;
   safeEditMessage: (target: PiSessionContext, messageId: number, text: string, options?: TextOptions) => Promise<void>;

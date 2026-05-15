@@ -99,11 +99,17 @@ export function createExtensionDialogManager(deps: {
   defaultTimeoutMs: number;
 }): ExtensionDialogManager {
   const pendingDialogs = new Map<string, PendingExtensionDialog>();
+  const dialogContextKeys = new Map<string, string>();
   let extensionDialogCounter = 0;
 
   const nextExtensionDialogId = (): string => {
     extensionDialogCounter += 1;
     return extensionDialogCounter.toString(36);
+  };
+
+  const setPending = (contextKey: string, pendingDialog: PendingExtensionDialog): void => {
+    pendingDialogs.set(contextKey, pendingDialog);
+    dialogContextKeys.set(pendingDialog.dialogId, contextKey);
   };
 
   const clearPending = (contextKey: string): PendingExtensionDialog | undefined => {
@@ -113,6 +119,7 @@ export function createExtensionDialogManager(deps: {
     }
 
     pendingDialogs.delete(contextKey);
+    dialogContextKeys.delete(pendingDialog.dialogId);
     if (pendingDialog.timeoutId) {
       clearTimeout(pendingDialog.timeoutId);
     }
@@ -171,6 +178,33 @@ export function createExtensionDialogManager(deps: {
   const getPending = (target: PiSessionContext): PendingExtensionDialog | undefined =>
     pendingDialogs.get(deps.getContextKey(target));
 
+  const getPendingForResolution = (
+    target: PiSessionContext,
+    dialogId: string,
+  ): { contextKey: string; pendingDialog: PendingExtensionDialog } | undefined => {
+    const dialogContextKey = dialogContextKeys.get(dialogId);
+    if (dialogContextKey) {
+      const pendingDialog = pendingDialogs.get(dialogContextKey);
+      if (pendingDialog?.dialogId === dialogId) {
+        return { contextKey: dialogContextKey, pendingDialog };
+      }
+      dialogContextKeys.delete(dialogId);
+    }
+
+    const contextKey = deps.getContextKey(target);
+    const pendingDialog = pendingDialogs.get(contextKey);
+    if (!pendingDialog || pendingDialog.dialogId !== dialogId) {
+      return undefined;
+    }
+
+    return { contextKey, pendingDialog };
+  };
+
+  const matchesPendingMessage = (
+    pendingDialog: PendingExtensionDialog,
+    messageId: number | undefined,
+  ): boolean => messageId === undefined || pendingDialog.messageId === messageId;
+
   return {
     hasPending(target) {
       return pendingDialogs.has(deps.getContextKey(target));
@@ -222,7 +256,7 @@ export function createExtensionDialogManager(deps: {
           pendingDialog.abortCleanup = () => dialogOptions.signal?.removeEventListener("abort", onAbort);
         }
         pendingDialog.timeoutId = createDialogTimeout(contextKey, target, pendingDialog, () => resolve(undefined), dialogOptions?.timeout);
-        pendingDialogs.set(contextKey, pendingDialog);
+        setPending(contextKey, pendingDialog);
       });
     },
 
@@ -262,7 +296,7 @@ export function createExtensionDialogManager(deps: {
           pendingDialog.abortCleanup = () => dialogOptions.signal?.removeEventListener("abort", onAbort);
         }
         pendingDialog.timeoutId = createDialogTimeout(contextKey, target, pendingDialog, () => resolve(false), dialogOptions?.timeout);
-        pendingDialogs.set(contextKey, pendingDialog);
+        setPending(contextKey, pendingDialog);
       });
     },
 
@@ -307,7 +341,7 @@ export function createExtensionDialogManager(deps: {
           pendingDialog.abortCleanup = () => dialogOptions.signal?.removeEventListener("abort", onAbort);
         }
         pendingDialog.timeoutId = createDialogTimeout(contextKey, target, pendingDialog, () => resolve(undefined), dialogOptions?.timeout);
-        pendingDialogs.set(contextKey, pendingDialog);
+        setPending(contextKey, pendingDialog);
       });
     },
 
@@ -344,9 +378,13 @@ export function createExtensionDialogManager(deps: {
     },
 
     async resolveSelect(target, dialogId, messageId, optionIndex) {
-      const contextKey = deps.getContextKey(target);
-      const pendingDialog = pendingDialogs.get(contextKey);
-      if (!pendingDialog || pendingDialog.kind !== "select" || pendingDialog.dialogId !== dialogId || pendingDialog.messageId !== messageId) {
+      const resolvedPending = getPendingForResolution(target, dialogId);
+      if (!resolvedPending) {
+        return { callbackText: "Dialog expired" };
+      }
+
+      const pendingDialog = resolvedPending.pendingDialog;
+      if (pendingDialog.kind !== "select" || !matchesPendingMessage(pendingDialog, messageId)) {
         return { callbackText: "Dialog expired" };
       }
 
@@ -355,54 +393,71 @@ export function createExtensionDialogManager(deps: {
         return { callbackText: "Option expired" };
       }
 
-      clearPending(contextKey);
-      pendingDialog.resolve(selected);
+      clearPending(resolvedPending.contextKey);
       return {
         callbackText: `Selected ${trimLine(selected, 32)}`,
         afterAnswer: async () => {
-          await finalizePending(
-            target,
-            pendingDialog,
-            renderDialogPanel(pendingDialog.title, [`Selected: ${selected}`], "✅"),
-          );
+          try {
+            await finalizePending(
+              target,
+              pendingDialog,
+              renderDialogPanel(pendingDialog.title, [`Selected: ${selected}`], "✅"),
+            );
+          } finally {
+            pendingDialog.resolve(selected);
+          }
         },
       };
     },
 
     async resolveConfirm(target, dialogId, messageId, confirmed) {
-      const contextKey = deps.getContextKey(target);
-      const pendingDialog = pendingDialogs.get(contextKey);
-      if (!pendingDialog || pendingDialog.kind !== "confirm" || pendingDialog.dialogId !== dialogId || pendingDialog.messageId !== messageId) {
+      const resolvedPending = getPendingForResolution(target, dialogId);
+      if (!resolvedPending) {
         return { callbackText: "Dialog expired" };
       }
 
-      clearPending(contextKey);
-      pendingDialog.resolve(confirmed);
+      const pendingDialog = resolvedPending.pendingDialog;
+      if (pendingDialog.kind !== "confirm" || !matchesPendingMessage(pendingDialog, messageId)) {
+        return { callbackText: "Dialog expired" };
+      }
+
+      clearPending(resolvedPending.contextKey);
       return {
         callbackText: confirmed ? "Confirmed" : "Cancelled",
         afterAnswer: async () => {
-          await finalizePending(
-            target,
-            pendingDialog,
-            renderDialogPanel(pendingDialog.title, [confirmed ? "Confirmed." : "Cancelled."], confirmed ? "✅" : "⛔"),
-          );
+          try {
+            await finalizePending(
+              target,
+              pendingDialog,
+              renderDialogPanel(pendingDialog.title, [confirmed ? "Confirmed." : "Cancelled."], confirmed ? "✅" : "⛔"),
+            );
+          } finally {
+            pendingDialog.resolve(confirmed);
+          }
         },
       };
     },
 
     async resolveCancel(target, dialogId, messageId) {
-      const contextKey = deps.getContextKey(target);
-      const pendingDialog = pendingDialogs.get(contextKey);
-      if (!pendingDialog || pendingDialog.dialogId !== dialogId || pendingDialog.messageId !== messageId) {
+      const resolvedPending = getPendingForResolution(target, dialogId);
+      if (!resolvedPending) {
         return { callbackText: "Dialog expired" };
       }
 
-      clearPending(contextKey);
+      const pendingDialog = resolvedPending.pendingDialog;
+      if (!matchesPendingMessage(pendingDialog, messageId)) {
+        return { callbackText: "Dialog expired" };
+      }
+
+      clearPending(resolvedPending.contextKey);
       return {
         callbackText: "Cancelled",
         afterAnswer: async () => {
-          resolveCancelled(pendingDialog);
-          await finalizePending(target, pendingDialog, renderDialogPanel(pendingDialog.title, ["Dialog cancelled."], "⛔"));
+          try {
+            await finalizePending(target, pendingDialog, renderDialogPanel(pendingDialog.title, ["Dialog cancelled."], "⛔"));
+          } finally {
+            resolveCancelled(pendingDialog);
+          }
         },
       };
     },

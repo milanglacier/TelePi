@@ -12,7 +12,9 @@ import {
   filterCommandPickerEntries,
   getCommandPickerCounts,
   getCommandPickerFilterName,
+  getTelepiNativeCommandMenu,
   normalizeSlashCommand,
+  rewriteSlashCommandForTelegram,
 } from "../../src/bot/slash-command.js";
 
 function createSourceInfo(filePath: string) {
@@ -21,6 +23,16 @@ function createSourceInfo(filePath: string) {
     source: "local" as const,
     scope: "project" as const,
     origin: "top-level" as const,
+  };
+}
+
+function makeSlashCommand(name: string, overrides: Partial<SlashCommandInfo> = {}): SlashCommandInfo {
+  return {
+    name,
+    description: `${name} command`,
+    source: "extension",
+    sourceInfo: createSourceInfo(`/ext/${name}.ts`) as any,
+    ...overrides,
   };
 }
 
@@ -48,6 +60,66 @@ describe("bot slash-command helpers", () => {
     expect(normalizeSlashCommand("/review@OtherBot foo", "telepibot")).toBeUndefined();
     expect(normalizeSlashCommand("not a command", "telepibot")).toBeUndefined();
     expect(normalizeSlashCommand("/", "telepibot")).toBeUndefined();
+  });
+
+  it("detects TelePi bare native menus from discovered slash command metadata", () => {
+    const entries = [
+      { id: "list", label: "📋 /cron list", commandText: "/cron list" },
+      { id: "status", label: "📊 /cron status", commandText: "/cron status" },
+      { id: "add", label: "➕ /cron add", commandText: "/cron add" },
+      { id: "manage", label: "🛠️ /cron manage", commandText: "/cron manage" },
+    ];
+    const slashCommands: SlashCommandInfo[] = [
+      makeSlashCommand("cron", {
+        description: "Manage PiCron schedules",
+        integrations: {
+          telepi: {
+            bare: {
+              kind: "native-menu",
+              entries,
+            },
+          },
+        },
+      }),
+    ];
+
+    expect(getTelepiNativeCommandMenu({ name: "cron", text: "/cron" }, slashCommands)).toEqual({
+      name: "cron",
+      bareCommandText: "/cron",
+      title: "/cron",
+      entries,
+    });
+  });
+
+  it("treats missing or invalid native menu metadata as a normal slash command", () => {
+    expect(
+      getTelepiNativeCommandMenu(
+        { name: "cron", text: "/cron" },
+        [makeSlashCommand("cron", { description: "Manage PiCron schedules" })],
+      ),
+    ).toBeUndefined();
+
+    expect(
+      getTelepiNativeCommandMenu(
+        { name: "cron", text: "/cron" },
+        [
+          makeSlashCommand("cron", {
+            description: "Manage PiCron schedules",
+            integrations: {
+              telepi: {
+                bare: {
+                  kind: "native-menu",
+                  entries: [
+                    { id: "list", label: "📋 /cron list", commandText: "/cron list" },
+                    { id: "broken", label: "", commandText: "/cron status" } as any,
+                  ],
+                },
+              },
+            },
+          }),
+        ],
+      ),
+    ).toBeUndefined();
   });
 
   it("builds command picker entries with TelePi commands first and source labels for Pi commands", () => {
@@ -168,6 +240,29 @@ describe("bot slash-command helpers", () => {
     expect(filterCommandPickerEntries(entries, "telepi").every((entry) => entry.kind === "telepi")).toBe(true);
     expect(filterCommandPickerEntries(entries, "pi").every((entry) => entry.kind === "pi")).toBe(true);
     expect(filterCommandPickerEntries(entries, "all")).toEqual(entries);
+  });
+
+  it("passes slash commands through unchanged for Telegram", () => {
+    expect(
+      rewriteSlashCommandForTelegram(
+        { name: "cron", text: "/cron" },
+        [{ name: "cron", description: "Manage PiCron schedules", source: "extension" } as SlashCommandInfo],
+      ),
+    ).toBe("/cron");
+
+    expect(
+      rewriteSlashCommandForTelegram(
+        { name: "cron", text: "/cron add" },
+        [{ name: "cron", description: "Manage PiCron schedules", source: "extension" } as SlashCommandInfo],
+      ),
+    ).toBe("/cron add");
+
+    expect(
+      rewriteSlashCommandForTelegram(
+        { name: "review", text: "/review repo" },
+        [{ name: "cron", description: "Manage PiCron schedules", source: "extension" } as SlashCommandInfo],
+      ),
+    ).toBe("/review repo");
   });
 
   it("builds chat-scoped commands for Telegram and filters unsupported or conflicting names", () => {

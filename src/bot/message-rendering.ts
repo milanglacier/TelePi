@@ -32,6 +32,7 @@ export function renderHelpPlain(info: PiSessionInfo): string {
     "/session — show current session details",
     "/sessions — list and switch saved sessions",
     "/sessions <path|id> — switch directly to a session file or session ID",
+    "/context — show context usage and session stats",
     "/model — switch AI model",
     "/tree — view the session tree",
     "/branch <id> — navigate to a tree entry",
@@ -58,6 +59,7 @@ export function renderHelpHTML(info: PiSessionInfo): string {
     "<code>/session</code> — show current session details",
     "<code>/sessions</code> — list and switch saved sessions",
     "<code>/sessions &lt;path|id&gt;</code> — switch directly to a session file or session ID",
+    "<code>/context</code> — show context usage and session stats",
     "<code>/model</code> — switch AI model",
     "<code>/tree</code> — view the session tree",
     "<code>/branch &lt;id&gt;</code> — navigate to a tree entry",
@@ -160,6 +162,85 @@ function renderSessionDiagnostics(
   }
 
   return lines.join("\n");
+}
+
+export interface ContextUsageInfo {
+  tokens: number | null;
+  contextWindow: number;
+  percent: number | null;
+}
+
+export interface SessionStatsInfo {
+  userMessages: number;
+  assistantMessages: number;
+  toolCalls: number;
+  toolResults: number;
+  totalMessages: number;
+  tokens: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    total: number;
+  };
+  cost: number;
+  contextUsage?: ContextUsageInfo;
+  sessionFile: string | undefined;
+  sessionId: string;
+}
+
+function formatNumber(n: number): string {
+  return n.toLocaleString("en-US");
+}
+
+export function renderContextUsagePlain(usage: ContextUsageInfo): string {
+  const tokenLine = usage.tokens !== null
+    ? `Tokens in context: ${formatNumber(usage.tokens)}`
+    : "Tokens in context: unknown (not yet estimated)";
+  const windowLine = `Context window: ${formatNumber(usage.contextWindow)}`;
+  const percentLine = usage.percent !== null
+    ? `Usage: ${usage.percent.toFixed(2)}%`
+    : "Usage: unknown";
+  return [tokenLine, windowLine, percentLine].join("\n");
+}
+
+export function renderContextUsageHTML(usage: ContextUsageInfo): string {
+  const tokenLine = usage.tokens !== null
+    ? `<b>Tokens in context:</b> <code>${formatNumber(usage.tokens)}</code>`
+    : `<b>Tokens in context:</b> <i>unknown (not yet estimated)</i>`;
+  const windowLine = `<b>Context window:</b> <code>${formatNumber(usage.contextWindow)}</code>`;
+  const percentLine = usage.percent !== null
+    ? `<b>Usage:</b> <code>${usage.percent.toFixed(2)}%</code>`
+    : `<b>Usage:</b> <i>unknown</i>`;
+  return [tokenLine, windowLine, percentLine].join("\n");
+}
+
+export function renderSessionStatsPlain(stats: SessionStatsInfo): string {
+  return [
+    `Messages: ${stats.userMessages} user, ${stats.assistantMessages} assistant (${stats.totalMessages} total)`,
+    `Tool calls: ${stats.toolCalls}`,
+    `Tokens: ${formatNumber(stats.tokens.input)} input, ${formatNumber(stats.tokens.output)} output (${formatNumber(stats.tokens.total)} total)`,
+    stats.tokens.cacheRead > 0 || stats.tokens.cacheWrite > 0
+      ? `Cache: ${formatNumber(stats.tokens.cacheRead)} read, ${formatNumber(stats.tokens.cacheWrite)} write`
+      : undefined,
+    stats.cost > 0 ? `Estimated cost: $${stats.cost.toFixed(4)}` : undefined,
+  ].filter((line): line is string => line !== undefined).join("\n");
+}
+
+export function renderSessionStatsHTML(stats: SessionStatsInfo): string {
+  const cacheLine = stats.tokens.cacheRead > 0 || stats.tokens.cacheWrite > 0
+    ? `<b>Cache:</b> <code>${formatNumber(stats.tokens.cacheRead)}</code> read, <code>${formatNumber(stats.tokens.cacheWrite)}</code> write`
+    : undefined;
+  const costLine = stats.cost > 0
+    ? `<b>Estimated cost:</b> <code>$${stats.cost.toFixed(4)}</code>`
+    : undefined;
+  return [
+    `<b>Messages:</b> <code>${stats.userMessages}</code> user, <code>${stats.assistantMessages}</code> assistant (<code>${stats.totalMessages}</code> total)`,
+    `<b>Tool calls:</b> <code>${stats.toolCalls}</code>`,
+    `<b>Tokens:</b> <code>${formatNumber(stats.tokens.input)}</code> input, <code>${formatNumber(stats.tokens.output)}</code> output (<code>${formatNumber(stats.tokens.total)}</code> total)`,
+    cacheLine,
+    costLine,
+  ].filter((line): line is string => line !== undefined).join("\n");
 }
 
 export function renderVoiceSupportPlain(backends: string[], warning?: string): string {

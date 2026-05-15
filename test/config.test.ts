@@ -29,6 +29,8 @@ describe("loadConfig", () => {
     delete process.env.TOOL_VERBOSITY;
     delete process.env.TELEPI_CONFIG;
     delete process.env.TELEPI_WORKSPACE;
+    delete process.env.TELEPI_PROMPT_INBOX_DIR;
+    delete process.env.TELEPI_PROMPT_INBOX_INTERVAL_MS;
     delete process.env.container;
   });
 
@@ -56,6 +58,8 @@ describe("loadConfig", () => {
       piSessionPath: "/tmp/session.jsonl",
       piModel: "anthropic/claude-sonnet-4-5",
       toolVerbosity: "all",
+      promptInboxDir: undefined,
+      promptInboxIntervalMs: 60000,
     });
   });
 
@@ -258,6 +262,59 @@ describe("loadConfig", () => {
     const config = loadConfig();
 
     expect(config.workspace).toBe("/workspace");
+  });
+
+  it("parses TELEPI_PROMPT_INBOX_DIR and resolves it from cwd", () => {
+    process.env.TELEGRAM_BOT_TOKEN = "bot-token";
+    process.env.TELEGRAM_ALLOWED_USER_IDS = "123";
+    process.env.TELEPI_PROMPT_INBOX_DIR = " ./prompt-inbox ";
+
+    const config = loadConfig();
+
+    expect(config.promptInboxDir).toBe(path.resolve(cwdDir, "prompt-inbox"));
+  });
+
+  it("parses TELEPI_PROMPT_INBOX_INTERVAL_MS when valid", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    process.env.TELEGRAM_BOT_TOKEN = "bot-token";
+    process.env.TELEGRAM_ALLOWED_USER_IDS = "123";
+    process.env.TELEPI_PROMPT_INBOX_INTERVAL_MS = "15000";
+
+    const config = loadConfig();
+
+    expect(config.promptInboxIntervalMs).toBe(15000);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("falls back to default prompt inbox interval for invalid or non-positive values", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    process.env.TELEGRAM_BOT_TOKEN = "bot-token";
+    process.env.TELEGRAM_ALLOWED_USER_IDS = "123";
+
+    process.env.TELEPI_PROMPT_INBOX_INTERVAL_MS = "nope";
+    expect(loadConfig().promptInboxIntervalMs).toBe(60000);
+
+    process.env.TELEPI_PROMPT_INBOX_INTERVAL_MS = "0";
+    expect(loadConfig().promptInboxIntervalMs).toBe(60000);
+
+    process.env.TELEPI_PROMPT_INBOX_INTERVAL_MS = "-10";
+    expect(loadConfig().promptInboxIntervalMs).toBe(60000);
+
+    expect(warnSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it("clamps prompt inbox interval values below 1000ms", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    process.env.TELEGRAM_BOT_TOKEN = "bot-token";
+    process.env.TELEGRAM_ALLOWED_USER_IDS = "123";
+    process.env.TELEPI_PROMPT_INBOX_INTERVAL_MS = "999";
+
+    const config = loadConfig();
+
+    expect(config.promptInboxIntervalMs).toBe(1000);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('TELEPI_PROMPT_INBOX_INTERVAL_MS is below 1000ms'),
+    );
   });
 });
 

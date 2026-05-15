@@ -17,6 +17,8 @@ export interface TelePiConfig {
   piSessionPath?: string;
   piModel?: string;
   toolVerbosity: ToolVerbosity;
+  promptInboxDir?: string;
+  promptInboxIntervalMs: number;
 }
 
 export type TelePiConfigPathSource = "explicit" | "default" | "cwd" | "missing";
@@ -28,6 +30,9 @@ export interface TelePiConfigPathInfo {
   resolvedPath?: string;
   source: TelePiConfigPathSource;
 }
+
+const DEFAULT_PROMPT_INBOX_INTERVAL_MS = 60_000;
+const MIN_PROMPT_INBOX_INTERVAL_MS = 1_000;
 
 export function loadConfig(): TelePiConfig {
   const envPath = getConfigEnvPathInfo().resolvedPath;
@@ -41,6 +46,8 @@ export function loadConfig(): TelePiConfig {
   const piSessionPath = optionalString(process.env.PI_SESSION_PATH);
   const piModel = optionalString(process.env.PI_MODEL);
   const toolVerbosity = parseToolVerbosity(optionalString(process.env.TOOL_VERBOSITY));
+  const promptInboxDir = resolveOptionalPath(process.env.TELEPI_PROMPT_INBOX_DIR);
+  const promptInboxIntervalMs = parsePromptInboxIntervalMs(optionalString(process.env.TELEPI_PROMPT_INBOX_INTERVAL_MS));
 
   return {
     telegramBotToken,
@@ -50,6 +57,8 @@ export function loadConfig(): TelePiConfig {
     piSessionPath,
     piModel,
     toolVerbosity,
+    promptInboxDir,
+    promptInboxIntervalMs,
   };
 }
 
@@ -164,6 +173,34 @@ function requireEnv(name: string): string {
 function optionalString(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
+}
+
+function resolveOptionalPath(value: string | undefined): string | undefined {
+  const normalized = optionalString(value);
+  return normalized ? resolvePathFromCwd(normalized) : undefined;
+}
+
+function parsePromptInboxIntervalMs(raw: string | undefined): number {
+  if (!raw) {
+    return DEFAULT_PROMPT_INBOX_INTERVAL_MS;
+  }
+
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.warn(
+      `Invalid TELEPI_PROMPT_INBOX_INTERVAL_MS value: "${raw}". Falling back to ${DEFAULT_PROMPT_INBOX_INTERVAL_MS}ms.`
+    );
+    return DEFAULT_PROMPT_INBOX_INTERVAL_MS;
+  }
+
+  if (parsed < MIN_PROMPT_INBOX_INTERVAL_MS) {
+    console.warn(
+      `TELEPI_PROMPT_INBOX_INTERVAL_MS is below ${MIN_PROMPT_INBOX_INTERVAL_MS}ms. Clamping to ${MIN_PROMPT_INBOX_INTERVAL_MS}ms.`
+    );
+    return MIN_PROMPT_INBOX_INTERVAL_MS;
+  }
+
+  return parsed;
 }
 
 export function parseAllowedUserIds(raw: string): number[] {

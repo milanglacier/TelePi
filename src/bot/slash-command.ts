@@ -14,6 +14,7 @@ export const TELEPI_BOT_COMMANDS = [
   { command: "abort", description: "Cancel current operation" },
   { command: "session", description: "Current session details" },
   { command: "sessions", description: "List and switch sessions (or /sessions <path|id>)" },
+  { command: "context", description: "Show context usage and session stats" },
   { command: "model", description: "Switch AI model" },
   { command: "tree", description: "View and navigate the session tree" },
   { command: "branch", description: "Navigate to a tree entry (/branch <id>)" },
@@ -50,6 +51,19 @@ export type CommandPickerEntry =
       commandText: string;
       source: string;
     };
+
+export type TelepiNativeCommandMenuEntry = {
+  id: string;
+  label: string;
+  commandText: string;
+};
+
+export type TelepiNativeCommandMenu = {
+  name: string;
+  bareCommandText: string;
+  title: string;
+  entries: TelepiNativeCommandMenuEntry[];
+};
 
 export function normalizeSlashCommand(text: string, botUsername?: string): NormalizedSlashCommand | undefined {
   const trimmed = text.trim();
@@ -153,6 +167,81 @@ function getPiSlashCommandLabel(
     default:
       return `⚡ ${displayText}`;
   }
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function normalizeTelepiNativeCommandMenuEntry(entry: unknown): TelepiNativeCommandMenuEntry | undefined {
+  if (!entry || typeof entry !== "object") {
+    return undefined;
+  }
+
+  const candidate = entry as Partial<TelepiNativeCommandMenuEntry>;
+  if (!isNonEmptyString(candidate.id) || !isNonEmptyString(candidate.label) || !isNonEmptyString(candidate.commandText)) {
+    return undefined;
+  }
+
+  return {
+    id: candidate.id.trim(),
+    label: candidate.label.trim(),
+    commandText: candidate.commandText.trim(),
+  };
+}
+
+function getTelepiNativeCommandMenuEntries(command: SlashCommandInfo): TelepiNativeCommandMenuEntry[] | undefined {
+  const bareIntegration = (command as { integrations?: { telepi?: { bare?: { kind?: string; entries?: unknown[] } } } }).integrations?.telepi?.bare;
+  if (!bareIntegration || bareIntegration.kind !== "native-menu" || !Array.isArray(bareIntegration.entries)) {
+    return undefined;
+  }
+
+  const entries = bareIntegration.entries
+    .map((entry: unknown) => normalizeTelepiNativeCommandMenuEntry(entry))
+    .filter((entry): entry is TelepiNativeCommandMenuEntry => entry !== undefined);
+
+  return entries.length === bareIntegration.entries.length && entries.length > 0 ? entries : undefined;
+}
+
+function getOnlyMatchingCommand(
+  slashCommands: SlashCommandInfo[],
+  predicate: (command: SlashCommandInfo) => boolean,
+): SlashCommandInfo | undefined {
+  const matches = slashCommands.filter(predicate);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+export function getTelepiNativeCommandMenu(
+  command: NormalizedSlashCommand,
+  slashCommands: SlashCommandInfo[],
+): TelepiNativeCommandMenu | undefined {
+  if (command.text !== `/${command.name}`) {
+    return undefined;
+  }
+
+  const matchingCommand = getOnlyMatchingCommand(slashCommands, (slashCommand) => slashCommand.name === command.name);
+  if (!matchingCommand) {
+    return undefined;
+  }
+
+  const entries = getTelepiNativeCommandMenuEntries(matchingCommand);
+  if (!entries) {
+    return undefined;
+  }
+
+  return {
+    name: matchingCommand.name,
+    bareCommandText: `/${matchingCommand.name}`,
+    title: `/${matchingCommand.name}`,
+    entries,
+  };
+}
+
+export function rewriteSlashCommandForTelegram(
+  command: NormalizedSlashCommand,
+  _slashCommands: SlashCommandInfo[],
+): string {
+  return command.text;
 }
 
 export function getCommandPickerFilterName(filter: CommandPickerFilter): string {
