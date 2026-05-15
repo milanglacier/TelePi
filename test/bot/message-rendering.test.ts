@@ -22,6 +22,7 @@ import {
   renderVoiceSupportPlain,
   splitMarkdownForTelegram,
   splitTelegramText,
+  stripAnsiEscapes,
   stripHtml,
   summarizeToolOutput,
   trimLine,
@@ -177,5 +178,12 @@ describe("bot message rendering helpers", () => {
     expect(isTelegramParseError(new Error("unsupported start tag at byte offset 1"))).toBe(true);
     expect(isTelegramParseError(new Error("Entity name expected"))).toBe(true);
     expect(isTelegramParseError(new Error("plain failure"))).toBe(false);
+  });
+
+  it("strips ANSI escape sequences from text", () => {
+    expect(stripAnsiEscapes("\x1b[31mHello\x1b[0m")).toBe("Hello");
+    expect(stripAnsiEscapes("\x1b[1;32mBold green\x1b[0m")).toBe("Bold green");
+    expect(stripAnsiEscapes("plain text")).toBe("plain text");
+    expect(stripAnsiEscapes("Output:\n\x1b[33mwarning\x1b[0m\n\x1b[31merror\x1b[0m\ndone")).toBe("Output:\nwarning\nerror\ndone");
   });
 });

@@ -1948,6 +1948,71 @@ describe("PiSessionService", () => {
     expect(onAgentEnd).toHaveBeenCalledTimes(1);
   });
 
+  it("tracks prompt-flow active state via setPromptFlowActive", async () => {
+    const service = await PiSessionService.create(createConfig());
+
+    expect((service as any).isPromptFlowActiveFlag).toBe(false);
+
+    service.setPromptFlowActive(true);
+    expect((service as any).isPromptFlowActiveFlag).toBe(true);
+
+    service.setPromptFlowActive(false);
+    expect((service as any).isPromptFlowActiveFlag).toBe(false);
+  });
+
+  it("subscribes to autonomous events and only forwards when no prompt flow is active", async () => {
+    const service = await PiSessionService.create(createConfig());
+    const currentSession = mockState.createdSessions[0]?.session;
+
+    const onAutonomousStart = vi.fn();
+    const onAutonomousTextDelta = vi.fn();
+    const onAutonomousToolStart = vi.fn();
+    const onAutonomousToolEnd = vi.fn();
+    const onAutonomousEnd = vi.fn();
+
+    service.subscribeAutonomous({
+      onAutonomousStart,
+      onAutonomousTextDelta,
+      onAutonomousToolStart,
+      onAutonomousToolEnd,
+      onAutonomousEnd,
+    });
+
+    const emit = mockState.getSubscriber(currentSession);
+
+    // When no prompt flow is active, autonomous events should fire.
+    emit?.({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Auto" } });
+    expect(onAutonomousStart).toHaveBeenCalledTimes(1);
+    expect(onAutonomousTextDelta).toHaveBeenCalledWith("Auto");
+
+    emit?.({ type: "tool_execution_start", toolName: "bash", toolCallId: "tool-auto-1" });
+    expect(onAutonomousToolStart).toHaveBeenCalledWith("bash", "tool-auto-1");
+
+    emit?.({ type: "tool_execution_end", toolCallId: "tool-auto-1", isError: false });
+    expect(onAutonomousToolEnd).toHaveBeenCalledWith("tool-auto-1", false);
+
+    emit?.({ type: "agent_end" });
+    expect(onAutonomousEnd).toHaveBeenCalledTimes(1);
+
+    // When a prompt flow is active, autonomous events should be suppressed.
+    service.setPromptFlowActive(true);
+    onAutonomousStart.mockClear();
+    onAutonomousTextDelta.mockClear();
+    onAutonomousEnd.mockClear();
+
+    emit?.({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Prompt" } });
+    expect(onAutonomousTextDelta).not.toHaveBeenCalled();
+
+    emit?.({ type: "agent_end" });
+    expect(onAutonomousEnd).not.toHaveBeenCalled();
+
+    // After prompt flow ends, autonomous events should resume.
+    service.setPromptFlowActive(false);
+    emit?.({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Resume" } });
+    expect(onAutonomousStart).toHaveBeenCalledTimes(1);
+    expect(onAutonomousTextDelta).toHaveBeenCalledWith("Resume");
+  });
+
   it("reloads auth storage before prompting", async () => {
     const service = await PiSessionService.create(createConfig());
 
@@ -2110,5 +2175,23 @@ describe("PiSessionService", () => {
 
     await expect(pending).rejects.toThrow("Session removed during initialization");
     expect(registry.get({ chatId: 11, messageThreadId: 4 })).toBeUndefined();
+  });
+
+  it("resolves PiSessionContext by session ID", async () => {
+    const registry = await PiSessionRegistry.create(createConfig());
+    await registry.getOrCreate({ chatId: 42, messageThreadId: 7 });
+
+    const target = registry.getBySessionId("session-1");
+    expect(target).toEqual({ chatId: 42, messageThreadId: 7 });
+
+    expect(registry.getBySessionId("unknown-session")).toBeUndefined();
+  });
+
+  it("resolves PiSessionContext for chats without messageThreadId", async () => {
+    const registry = await PiSessionRegistry.create(createConfig());
+    await registry.getOrCreate({ chatId: 99 });
+
+    const target = registry.getBySessionId("session-1");
+    expect(target).toEqual({ chatId: 99 });
   });
 });

@@ -345,6 +345,8 @@ function createMockPiSession(overrides: Partial<PiSessionService> = {}) {
         }
       };
     }),
+    subscribeAutonomous: vi.fn().mockReturnValue(() => {}),
+    setPromptFlowActive: vi.fn(),
     dispose: vi.fn(),
     getContextUsage: vi.fn().mockReturnValue({
       tokens: 4500,

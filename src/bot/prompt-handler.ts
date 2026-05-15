@@ -15,6 +15,7 @@ import {
   renderToolStartMessage,
   renderMarkdownChunkWithinLimit,
   splitMarkdownForTelegram,
+  stripAnsiEscapes,
   TOOL_OUTPUT_PREVIEW_LIMIT,
   type RenderedChunk,
   type RenderedText,
@@ -415,7 +416,7 @@ async function runPromptFlow(
         return;
       }
 
-      state.partialResult = appendWithCap(state.partialResult, partialResult, TOOL_OUTPUT_PREVIEW_LIMIT);
+      state.partialResult = appendWithCap(state.partialResult, stripAnsiEscapes(partialResult), TOOL_OUTPUT_PREVIEW_LIMIT);
     },
     onToolEnd: (toolCallId, isError) => {
       if (toolVerbosity === "none" || toolVerbosity === "summary") {
@@ -427,6 +428,7 @@ async function runPromptFlow(
         return;
       }
 
+      state.partialResult = stripAnsiEscapes(state.partialResult);
       state.finalStatus = renderToolEndMessage(state.toolName, state.partialResult, isError);
       if (toolVerbosity === "errors-only") {
         if (!isError) {
@@ -461,6 +463,7 @@ async function runPromptFlow(
   });
 
   try {
+    piSession.setPromptFlowActive(true);
     if (images && images.length > 0) {
       await piSession.prompt(userText, images);
     } else {
@@ -495,6 +498,7 @@ async function runPromptFlow(
     stopTyping();
     clearFlushTimer();
     unsubscribe();
+    piSession.setPromptFlowActive(false);
   }
 }
 

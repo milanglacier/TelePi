@@ -48,6 +48,7 @@ import {
   logCallbackQueryError,
 } from "./bot/callback-query-logging.js";
 import { createPromptHandler } from "./bot/prompt-handler.js";
+import { createAutonomousHandler } from "./bot/autonomous-handler.js";
 import { startPromptInboxPolling } from "./bot/prompt-inbox.js";
 import { createCommandPickerHandlers, type PendingCommandPicker } from "./bot/command-picker.js";
 import { createBasicCommandHandlers } from "./bot/commands/basic.js";
@@ -119,6 +120,7 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
   const bot = new Bot<Context>(config.telegramBotToken);
   bot.api.config.use(autoRetry({ maxRetryAttempts: 3, maxDelaySeconds: 10 }));
 
+  const autonomousHandlers = new Map<string, { stop: () => void }>();
   const chatState = createBotChatState();
 
   const pendingSessionPicks = new Map<ContextKey, Array<{ path: string; cwd: string }>>();
@@ -296,6 +298,11 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
     pendingCommandPickers.delete(contextKey);
     pendingCommandMenus.delete(contextKey);
     surfacedStartupErrorSignatures.delete(contextKey);
+    const handler = autonomousHandlers.get(contextKey);
+    if (handler) {
+      handler.stop();
+      autonomousHandlers.delete(contextKey);
+    }
   };
 
   const clearContextPromptMemory = (target: PiSessionContext): void => {
@@ -356,6 +363,20 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
         await piSession.newSession();
       }
       await surfaceStartupErrorDiagnostics(ctx, target, piSession.getInfo());
+
+      // Wire up the autonomous handler for subagent-triggered turns.
+      const contextKey = getContextKey(target);
+      if (!autonomousHandlers.has(contextKey)) {
+        const handler = createAutonomousHandler({
+          bot,
+          target,
+          piSession,
+          toolVerbosity: config.toolVerbosity,
+        });
+        handler.start();
+        autonomousHandlers.set(contextKey, handler);
+      }
+
       return piSession;
     } catch (error) {
       const failure = renderPrefixedError("Failed to create session", error);

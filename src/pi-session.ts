@@ -57,6 +57,14 @@ export interface PiSessionCallbacks {
   onAgentEnd: () => void;
 }
 
+export interface AutonomousCallbacks {
+  onAutonomousStart(): void;
+  onAutonomousTextDelta(delta: string): void;
+  onAutonomousToolStart(toolName: string, toolCallId: string): void;
+  onAutonomousToolEnd(toolCallId: string, isError: boolean): void;
+  onAutonomousEnd(): void;
+}
+
 export interface PiSessionDiagnostic {
   type: "info" | "warning" | "error";
   message: string;
@@ -597,6 +605,9 @@ export class PiSessionService {
   private sessionCallbacks?: PiSessionCallbacks;
   private sessionUnsubscribe?: () => void;
   private extensionBindings?: Parameters<AgentSession["bindExtensions"]>[0];
+  private autonomousCallbacks?: AutonomousCallbacks;
+  private autonomousUnsubscribe?: () => void;
+  private isPromptFlowActiveFlag = false;
 
   private constructor(private readonly config: TelePiConfig) {
     this.currentWorkspace = config.workspace;
@@ -663,6 +674,23 @@ export class PiSessionService {
         this.sessionCallbacks = undefined;
         this.sessionUnsubscribe?.();
         this.sessionUnsubscribe = undefined;
+      }
+    };
+  }
+
+  setPromptFlowActive(active: boolean): void {
+    this.isPromptFlowActiveFlag = active;
+  }
+
+  subscribeAutonomous(callbacks: AutonomousCallbacks): () => void {
+    this.autonomousCallbacks = callbacks;
+    this.rebindAutonomousSubscription();
+
+    return () => {
+      if (this.autonomousCallbacks === callbacks) {
+        this.autonomousCallbacks = undefined;
+        this.autonomousUnsubscribe?.();
+        this.autonomousUnsubscribe = undefined;
       }
     };
   }
@@ -1098,6 +1126,8 @@ export class PiSessionService {
     const previousHandle = this.handle;
     this.sessionUnsubscribe?.();
     this.sessionUnsubscribe = undefined;
+    this.autonomousUnsubscribe?.();
+    this.autonomousUnsubscribe = undefined;
     this.handle = undefined;
 
     try {
@@ -1112,6 +1142,8 @@ export class PiSessionService {
   dispose(): void {
     this.sessionUnsubscribe?.();
     this.sessionUnsubscribe = undefined;
+    this.autonomousUnsubscribe?.();
+    this.autonomousUnsubscribe = undefined;
 
     const handle = this.handle;
     this.handle = undefined;
@@ -1177,6 +1209,56 @@ export class PiSessionService {
     this.sessionUnsubscribe = subscribeToSession(this.getSession(), this.sessionCallbacks);
   }
 
+  private rebindAutonomousSubscription(): void {
+    this.autonomousUnsubscribe?.();
+    this.autonomousUnsubscribe = undefined;
+
+    if (!this.autonomousCallbacks || !this.handle) {
+      return;
+    }
+
+    const callbacks = this.autonomousCallbacks;
+    let inAutonomousTurn = false;
+
+    const unsub = this.getSession().subscribe((event) => {
+      if (this.isPromptFlowActiveFlag) {
+        return;
+      }
+
+      switch (event.type) {
+        case "message_update":
+          if (event.assistantMessageEvent.type === "text_delta") {
+            if (!inAutonomousTurn) {
+              inAutonomousTurn = true;
+              callbacks.onAutonomousStart();
+            }
+            callbacks.onAutonomousTextDelta(event.assistantMessageEvent.delta);
+          }
+          break;
+        case "tool_execution_start":
+          if (!inAutonomousTurn) {
+            inAutonomousTurn = true;
+            callbacks.onAutonomousStart();
+          }
+          callbacks.onAutonomousToolStart(event.toolName, event.toolCallId);
+          break;
+        case "tool_execution_end":
+          callbacks.onAutonomousToolEnd(event.toolCallId, event.isError);
+          break;
+        case "agent_end":
+          if (inAutonomousTurn) {
+            inAutonomousTurn = false;
+            callbacks.onAutonomousEnd();
+          }
+          break;
+        default:
+          break;
+      }
+    });
+
+    this.autonomousUnsubscribe = unsub;
+  }
+
   private async disposeHandleAfterRebindFailure(
     handle: PiSessionHandle | undefined,
     previousWorkspace: string,
@@ -1184,6 +1266,8 @@ export class PiSessionService {
   ): Promise<never> {
     this.sessionUnsubscribe?.();
     this.sessionUnsubscribe = undefined;
+    this.autonomousUnsubscribe?.();
+    this.autonomousUnsubscribe = undefined;
     this.handle = undefined;
     this.currentWorkspace = previousWorkspace;
 
@@ -1223,6 +1307,7 @@ export class PiSessionService {
 
     await this.bindExtensionsToCurrentSession();
     this.rebindSessionSubscription();
+    this.rebindAutonomousSubscription();
   }
 }
 
@@ -1250,6 +1335,24 @@ export class PiSessionRegistry {
 
   get(context: PiSessionContext): PiSessionService | undefined {
     return this.services.get(getPiSessionContextKey(context));
+  }
+
+  getBySessionId(sessionId: string): PiSessionContext | undefined {
+    for (const [key, service] of this.services) {
+      try {
+        if (service.hasActiveSession() && service.getInfo().sessionId === sessionId) {
+          const [chatIdStr, threadIdStr] = key.split("::");
+          const chatId = Number(chatIdStr) || chatIdStr;
+          if (threadIdStr === "root") {
+            return { chatId };
+          }
+          return { chatId, messageThreadId: Number(threadIdStr) };
+        }
+      } catch {
+        // Service may be disposed or in invalid state during iteration.
+      }
+    }
+    return undefined;
   }
 
   getInfo(context: PiSessionContext): PiSessionInfo {
