@@ -18,7 +18,7 @@ describe("extension dialog manager", () => {
     return { manager, sendTextMessage, editMessage };
   }
 
-  it("opens and resolves select dialogs after the callback answer step", async () => {
+  it("resolves select promises immediately without waiting for the message edit", async () => {
     const { manager, sendTextMessage, editMessage } = createManager();
 
     const pendingChoice = manager.openSelect(target, "Pick one", ["Alpha", "Beta"]);
@@ -34,6 +34,9 @@ describe("extension dialog manager", () => {
     expect(result.callbackText).toBe("Selected Beta");
     expect(editMessage).not.toHaveBeenCalled();
 
+    // Promise resolves immediately — before the message edit fires
+    await expect(pendingChoice).resolves.toBe("Beta");
+
     await result.afterAnswer?.();
 
     const selected = renderDialogPanel("Pick one", ["Selected: Beta"], "✅");
@@ -43,7 +46,6 @@ describe("extension dialog manager", () => {
       selected.text,
       expect.objectContaining({ fallbackText: selected.fallbackText, parseMode: "HTML" }),
     );
-    await expect(pendingChoice).resolves.toBe("Beta");
   });
 
   it("times out dialogs and finalizes them in Telegram", async () => {
@@ -95,17 +97,22 @@ describe("extension dialog manager", () => {
     );
   });
 
-  it("resolves confirm and cancel callbacks after the callback answer step", async () => {
+  it("resolves confirm and cancel promises immediately before the message edit", async () => {
     const { manager, editMessage } = createManager();
 
+    // Confirm "Yes" path
     const pendingConfirm = manager.openConfirm(target, "Confirm deploy", "Ship it?");
     await Promise.resolve();
 
     const confirmResult = await manager.resolveConfirm(target, "1", 1, true);
     expect(confirmResult.callbackText).toBe("Confirmed");
     expect(editMessage).not.toHaveBeenCalled();
-    await confirmResult.afterAnswer?.();
+
+    // Promise resolves immediately — before the message edit fires
     await expect(pendingConfirm).resolves.toBe(true);
+
+    await confirmResult.afterAnswer?.();
+
     const confirmed = renderDialogPanel("Confirm deploy", ["Confirmed."], "✅");
     expect(editMessage).toHaveBeenCalledWith(
       target,
@@ -114,9 +121,30 @@ describe("extension dialog manager", () => {
       expect.objectContaining({ fallbackText: confirmed.fallbackText, parseMode: "HTML" }),
     );
 
+    // Confirm "No" path
+    const pendingDeny = manager.openConfirm(target, "Permission Required", "Allow bash?");
+    await Promise.resolve();
+
+    const denyResult = await manager.resolveConfirm(target, "2", 1, false);
+    expect(denyResult.callbackText).toBe("Cancelled");
+
+    // Promise resolves immediately with false
+    await expect(pendingDeny).resolves.toBe(false);
+
+    await denyResult.afterAnswer?.();
+
+    const cancelledPanel = renderDialogPanel("Permission Required", ["Cancelled."], "⛔");
+    expect(editMessage).toHaveBeenCalledWith(
+      target,
+      1,
+      cancelledPanel.text,
+      expect.objectContaining({ fallbackText: cancelledPanel.fallbackText, parseMode: "HTML" }),
+    );
+
+    // Cancel path via resolveCancel
     const pendingSelect = manager.openSelect(target, "Pick one", ["Alpha"]);
     await Promise.resolve();
-    const cancelResult = await manager.resolveCancel(target, "2", 1);
+    const cancelResult = await manager.resolveCancel(target, "3", 1);
     expect(cancelResult.callbackText).toBe("Cancelled");
     await cancelResult.afterAnswer?.();
     await expect(pendingSelect).resolves.toBeUndefined();
@@ -136,7 +164,11 @@ describe("extension dialog manager", () => {
     await Promise.resolve();
 
     const result = await manager.resolveSelect(target, "1", 1, 0);
-    await expect(result.afterAnswer?.()).rejects.toThrow("telegram down");
+
+    // Promise resolves immediately even though finalizePending will throw
     await expect(pendingChoice).resolves.toBe("Alpha");
+
+    // The message edit still fails as a background side effect
+    await expect(result.afterAnswer?.()).rejects.toThrow("telegram down");
   });
 });

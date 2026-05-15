@@ -356,18 +356,15 @@ export function createExtensionDialogManager(deps: {
       }
 
       clearPending(contextKey);
+      pendingDialog.resolve(selected);
       return {
         callbackText: `Selected ${trimLine(selected, 32)}`,
         afterAnswer: async () => {
-          try {
-            await finalizePending(
-              target,
-              pendingDialog,
-              renderDialogPanel(pendingDialog.title, [`Selected: ${selected}`], "✅"),
-            );
-          } finally {
-            pendingDialog.resolve(selected);
-          }
+          await finalizePending(
+            target,
+            pendingDialog,
+            renderDialogPanel(pendingDialog.title, [`Selected: ${selected}`], "✅"),
+          );
         },
       };
     },
@@ -380,18 +377,15 @@ export function createExtensionDialogManager(deps: {
       }
 
       clearPending(contextKey);
+      pendingDialog.resolve(confirmed);
       return {
         callbackText: confirmed ? "Confirmed" : "Cancelled",
         afterAnswer: async () => {
-          try {
-            await finalizePending(
-              target,
-              pendingDialog,
-              renderDialogPanel(pendingDialog.title, [confirmed ? "Confirmed." : "Cancelled."], confirmed ? "✅" : "⛔"),
-            );
-          } finally {
-            pendingDialog.resolve(confirmed);
-          }
+          await finalizePending(
+            target,
+            pendingDialog,
+            renderDialogPanel(pendingDialog.title, [confirmed ? "Confirmed." : "Cancelled."], confirmed ? "✅" : "⛔"),
+          );
         },
       };
     },
