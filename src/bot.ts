@@ -18,7 +18,6 @@ import {
   appendKeyboardItems,
   paginateKeyboard,
   type KeyboardItem,
-  KEYBOARD_PAGE_SIZE,
   NOOP_PAGE_CALLBACK_DATA,
 } from "./bot/keyboard.js";
 import {
@@ -49,7 +48,6 @@ import {
   type PiSessionContext,
   type PiSessionInfo,
   getPiSessionContextKey,
-  type PiSessionModelOption,
   type PiSessionRegistry,
   type PiSessionService,
 } from "./pi-session.js";
@@ -73,9 +71,6 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
   const pendingSessionButtons = new Map<ContextKey, KeyboardItem[]>();
   const pendingWorkspacePicks = new Map<ContextKey, string[]>();
   const pendingWorkspaceButtons = new Map<ContextKey, KeyboardItem[]>();
-  const pendingModelPicks = new Map<ContextKey, PiSessionModelOption[]>();
-  const pendingModelButtons = new Map<ContextKey, KeyboardItem[]>();
-  const pendingModelExtraButtons = new Map<ContextKey, KeyboardItem[]>();
   const pendingTreeNavs = new Map<ContextKey, string>();
   const pendingTreeViews = new Map<ContextKey, PendingTreeView>();
   const pendingBranchButtons = new Map<ContextKey, KeyboardItem[]>();
@@ -181,9 +176,6 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
     pendingSessionButtons.delete(contextKey);
     pendingWorkspacePicks.delete(contextKey);
     pendingWorkspaceButtons.delete(contextKey);
-    pendingModelPicks.delete(contextKey);
-    pendingModelButtons.delete(contextKey);
-    pendingModelExtraButtons.delete(contextKey);
     pendingTreeNavs.delete(contextKey);
     pendingTreeViews.delete(contextKey);
     pendingBranchButtons.delete(contextKey);
@@ -392,20 +384,13 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
   const { handleSessionsCommand, handleNewCommand, handleHandbackCommand } = sessionCommandHandlers;
 
   const modelCommandHandlers = createModelCommandHandlers({
-    getContextKey,
     getExistingSession,
     getOrCreateSession,
-    isBusy,
     refreshChatScopedCommands,
-    pendingModelPicks,
-    pendingModelButtons,
-    pendingModelExtraButtons,
-    buildKeyboard,
     safeReply,
-    safeEditMessage: (target, messageId, text, options) => safeEditMessage(bot, target, messageId, text, options),
     surfaceStartupErrorDiagnostics,
   });
-  const { renderModelPicker, handleModelCommand } = modelCommandHandlers;
+  const { handleModelCommand } = modelCommandHandlers;
 
   const treeCommandHandlers = createTreeCommandHandlers({
     getContextKey,
@@ -449,7 +434,7 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
         await handleHandbackCommand(ctx, target);
         return;
       case "model":
-        await handleModelCommand(ctx, target);
+        await handleModelCommand(ctx, target, ctx.message?.text);
         return;
       case "tree":
         await handleTreeCommand(ctx, target, "/tree");
@@ -551,7 +536,7 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
       return;
     }
 
-    await handleModelCommand(ctx, target);
+    await handleModelCommand(ctx, target, ctx.message?.text);
   });
 
   bot.command("tree", async (ctx) => {
@@ -658,7 +643,6 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
 
   handlePageCallback(/^switch_page_(\d+)$/, "switch", pendingSessionButtons, "Expired, run /sessions again");
   handlePageCallback(/^newws_page_(\d+)$/, "newws", pendingWorkspaceButtons, "Expired, run /new again");
-  handlePageCallback(/^model_page_(\d+)$/, "model", pendingModelButtons, "Expired, run /model again", pendingModelExtraButtons);
   handlePageCallback(/^branch_page_(\d+)$/, "branch", pendingBranchButtons, "Expired, run /branch again");
 
   registerTreeCallbacks({
@@ -824,88 +808,6 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
           parseMode: failure.parseMode,
         }, target);
       }
-    } finally {
-      chatState.endSwitching(target);
-    }
-  });
-
-  bot.callbackQuery("model_show_all", async (ctx) => {
-    const target = getTelegramTarget(ctx);
-    const messageId = ctx.callbackQuery.message?.message_id;
-
-    if (!target || !messageId) {
-      return;
-    }
-
-    const contextKey = getContextKey(target);
-    const piSession = getExistingSession(target);
-    const models = pendingModelPicks.get(contextKey);
-    if (!models || models.length === 0 || !piSession) {
-      await ctx.answerCallbackQuery({ text: "Expired, run /model again" });
-      return;
-    }
-
-    if (isBusy(target)) {
-      await ctx.answerCallbackQuery({ text: "Wait for the current prompt to finish" });
-      return;
-    }
-
-    await ctx.answerCallbackQuery({ text: "Loading all models..." });
-    await renderModelPicker(ctx, target, piSession, { showAll: true, messageId });
-  });
-
-  bot.callbackQuery(/^model_(\d+)$/, async (ctx) => {
-    const target = getTelegramTarget(ctx);
-    const messageId = ctx.callbackQuery.message?.message_id;
-    const index = Number.parseInt(ctx.match?.[1] ?? "", 10);
-
-    if (!target || Number.isNaN(index)) {
-      return;
-    }
-
-    const contextKey = getContextKey(target);
-    const piSession = getExistingSession(target);
-    const models = pendingModelPicks.get(contextKey);
-    if (!models || !models[index] || !piSession) {
-      await ctx.answerCallbackQuery({ text: "Expired, run /model again" });
-      return;
-    }
-
-    if (isBusy(target)) {
-      await ctx.answerCallbackQuery({ text: "Wait for the current prompt to finish" });
-      return;
-    }
-
-    await ctx.answerCallbackQuery({ text: "Switching model..." });
-    pendingModelPicks.delete(contextKey);
-    pendingModelButtons.delete(contextKey);
-    pendingModelExtraButtons.delete(contextKey);
-
-    chatState.beginSwitching(target);
-    try {
-      const modelName = await piSession.setModel(models[index].provider, models[index].id, models[index].thinkingLevel);
-      const html = `<b>Model switched to:</b> <code>${escapeHTML(modelName)}</code>`;
-      const plainText = `Model switched to: ${modelName}`;
-
-      if (messageId) {
-        await safeEditMessage(bot, target, messageId, html, { fallbackText: plainText });
-      } else {
-        await safeReply(ctx, html, { fallbackText: plainText }, target);
-      }
-    } catch (error) {
-      const failure = renderFailedText(error);
-      if (messageId) {
-        await safeEditMessage(bot, target, messageId, failure.text, {
-          fallbackText: failure.fallbackText,
-          parseMode: failure.parseMode,
-        });
-        return;
-      }
-
-      await safeReply(ctx, failure.text, {
-        fallbackText: failure.fallbackText,
-        parseMode: failure.parseMode,
-      }, target);
     } finally {
       chatState.endSwitching(target);
     }

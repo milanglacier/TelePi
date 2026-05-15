@@ -1368,164 +1368,85 @@ describe("createBot", () => {
     await pending;
   });
 
-  it("shows scoped models by default, can expand to all models, and handles model selection", async () => {
-    const scopedModels = [
-      {
-        provider: "github-copilot",
-        id: "codex",
-        name: "Codex",
-        current: true,
-        thinkingLevel: "high",
-      },
-    ];
-    const allModels = [
-      {
-        provider: "openai",
-        id: "codex",
-        name: "Codex",
-        current: false,
-      },
-      ...scopedModels,
-    ];
-    const listModels = vi.fn().mockImplementation((showAll?: boolean) =>
-      Promise.resolve(showAll ? allModels : scopedModels),
-    );
-
+  it("sets a model inline with provider/modelId format", async () => {
     const { bot, pi, api } = setupBot({
       piSessionOverrides: {
-        listModels,
-        setModel: vi.fn().mockResolvedValue("openai/codex"),
+        setModel: vi.fn().mockResolvedValue("opencode-go/deepseek-v4-flash"),
       },
     });
 
-    await bot.handleUpdate(createTestUpdate({ message: { text: "/model" } }));
-    expect(api.sendMessage.mock.calls[0]?.[1]).toContain("Select a model");
-    expect(api.sendMessage.mock.calls[0]?.[1]).toContain("Showing the current Pi model scope.");
-    expect(getReplyMarkupData(api)).toEqual(["model_0", "model_show_all"]);
-    expect(getReplyMarkupTexts(api)).toEqual([
-      "✅ github-copilot/codex · Codex : high",
-      "Show all models",
-    ]);
-    expect(listModels).toHaveBeenNthCalledWith(1, false);
-    expect(listModels).toHaveBeenNthCalledWith(2, true);
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/model opencode-go/deepseek-v4-flash" } }));
 
-    await bot.handleUpdate(createCallbackUpdate("model_show_all"));
-    expect(api.answerCallbackQuery).toHaveBeenCalledWith("cb_1", { text: "Loading all models..." });
-    expect(getEditedReplyMarkupData(api)).toEqual(["model_0", "model_1"]);
-    expect(getEditedReplyMarkupTexts(api)).toEqual([
-      "openai/codex · Codex",
-      "✅ github-copilot/codex · Codex : high",
-    ]);
-
-    await bot.handleUpdate(createCallbackUpdate("model_0"));
-    expect(api.answerCallbackQuery).toHaveBeenCalledWith("cb_1", { text: "Switching model..." });
-    expect(pi.service.setModel).toHaveBeenCalledWith("openai", "codex", undefined);
-    expect(api.editMessageText).toHaveBeenCalled();
+    expect(pi.service.setModel).toHaveBeenCalledWith("opencode-go", "deepseek-v4-flash", undefined);
+    expect(api.sendMessage.mock.calls[0]?.[1]).toContain("Model switched to");
+    expect(api.sendMessage.mock.calls[0]?.[1]).toContain("opencode-go/deepseek-v4-flash");
   });
 
-  it("applies the scoped thinking-level override when selecting a scoped model", async () => {
-    const { bot, pi } = setupBot({
+  it("rejects bare modelId without provider", async () => {
+    const { bot, api } = setupBot();
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/model gpt-4o" } }));
+
+    expect(api.sendMessage.mock.calls[0]?.[1]).toContain("Invalid model reference");
+    expect(api.sendMessage.mock.calls[0]?.[1]).toContain("provider/model-id");
+  });
+
+  it("sets a model inline with thinking level suffix", async () => {
+    const { bot, pi, api } = setupBot({
       piSessionOverrides: {
-        listModels: vi.fn().mockResolvedValue([
-          {
-            provider: "github-copilot",
-            id: "codex",
-            name: "Codex",
-            current: true,
-            thinkingLevel: "high",
-          },
-        ]),
-        setModel: vi.fn().mockResolvedValue("github-copilot/codex"),
+        setModel: vi.fn().mockResolvedValue("openai/gpt-4o"),
       },
     });
 
-    await bot.handleUpdate(createTestUpdate({ message: { text: "/model" } }));
-    await bot.handleUpdate(createCallbackUpdate("model_0"));
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/model openai/gpt-4o:high" } }));
 
-    expect(pi.service.setModel).toHaveBeenCalledWith("github-copilot", "codex", "high");
+    expect(pi.service.setModel).toHaveBeenCalledWith("openai", "gpt-4o", "high");
+    expect(api.sendMessage.mock.calls[0]?.[1]).toContain("Model switched to");
   });
 
-  it("keeps the show-all button while paging through scoped models", async () => {
-    const scopedModels = Array.from({ length: 7 }, (_, index) => ({
-      provider: "github-copilot",
-      id: `codex-${index}`,
-      name: `Codex ${index}`,
-      current: index === 0,
-    }));
-    const allModels = [
-      ...Array.from({ length: 2 }, (_, index) => ({
-        provider: "openai",
-        id: `gpt-${index}`,
-        name: `GPT ${index}`,
-        current: false,
-      })),
-      ...scopedModels,
-    ];
-    const listModels = vi.fn().mockImplementation((showAll?: boolean) =>
-      Promise.resolve(showAll ? allModels : scopedModels),
-    );
-
+  it("shows error for unknown inline model reference", async () => {
     const { bot, api } = setupBot({
       piSessionOverrides: {
-        listModels,
+        setModel: vi.fn().mockRejectedValue(new Error("Model not found: none/missing-model")),
       },
     });
 
-    await bot.handleUpdate(createTestUpdate({ message: { text: "/model" } }));
-    expect(getReplyMarkupData(api)).toEqual([
-      "model_0",
-      "model_1",
-      "model_2",
-      "model_3",
-      "model_4",
-      "model_5",
-      "noop_page",
-      "model_page_1",
-      "model_show_all",
-    ]);
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/model none/missing-model" } }));
 
-    await bot.handleUpdate(createCallbackUpdate("model_page_1"));
-    expect(getEditedReplyMarkupButtons(api).map((button) => button.callback_data)).toEqual([
-      "model_6",
-      "model_page_0",
-      "noop_page",
-      "model_show_all",
-    ]);
+    expect(api.sendMessage.mock.calls[0]?.[1]).toContain("no longer available");
   });
 
-  it("paginates model pickers across all available models", async () => {
-    const models = generateMockModels(21);
+  it("auto-creates a session for inline /model when no session exists", async () => {
+    let newSessionCalled = false;
     const { bot, pi, api } = setupBot({
       piSessionOverrides: {
-        listModels: vi.fn().mockImplementation((showAll?: boolean) =>
-          Promise.resolve(showAll ? models : models),
-        ),
+        hasActiveSession: vi.fn().mockReturnValue(false),
+        newSession: vi.fn().mockImplementation(async () => {
+          newSessionCalled = true;
+          return { info: { sessionId: "new-id", workspace: "/workspace" }, created: true };
+        }),
+        setModel: vi.fn().mockResolvedValue("openai/gpt-4o"),
       },
     });
 
-    await bot.handleUpdate(createTestUpdate({ message: { text: "/model" } }));
-    expect(getReplyMarkupData(api)).toEqual([
-      "model_0",
-      "model_1",
-      "model_2",
-      "model_3",
-      "model_4",
-      "model_5",
-      "noop_page",
-      "model_page_1",
-    ]);
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/model openai/gpt-4o" } }));
 
-    await bot.handleUpdate(createCallbackUpdate("model_page_3"));
-    expect(getEditedReplyMarkupButtons(api).map((button) => button.callback_data)).toEqual([
-      "model_18",
-      "model_19",
-      "model_20",
-      "model_page_2",
-      "noop_page",
-    ]);
+    expect(newSessionCalled).toBe(true);
+    expect(pi.service.setModel).toHaveBeenCalledWith("openai", "gpt-4o", undefined);
+    expect(api.sendMessage.mock.calls.at(-1)?.[1]).toContain("Model switched to");
+  });
 
-    await bot.handleUpdate(createCallbackUpdate("model_20"));
-    expect(pi.service.setModel).toHaveBeenCalledWith("provider20", "model-20", undefined);
+  it("shows setModel failure for inline model references", async () => {
+    const { bot, api } = setupBot({
+      piSessionOverrides: {
+        setModel: vi.fn().mockRejectedValue(new Error("Model not available")),
+      },
+    });
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/model openai/gpt-4o" } }));
+
+    expect(api.sendMessage.mock.calls[0]?.[1]).toContain("Failed:");
+    expect(api.sendMessage.mock.calls[0]?.[1]).toContain("Model not available");
   });
 
   it("handles /tree command variants and missing sessions", async () => {
@@ -2697,13 +2618,14 @@ describe("createBot", () => {
               { type: "error", message: "Prompt issue (/prompts/deploy.md): invalid frontmatter" },
             ],
           }),
+          setModel: vi.fn().mockResolvedValue("anthropic/claude-sonnet-4-5"),
         },
       },
     });
 
     await bot.handleUpdate(createTestUpdate({
       message: {
-        text: "/model",
+        text: "/model anthropic/claude-sonnet-4-5",
         chat: { id: ALLOWED_CHAT_ID, type: "supergroup" },
         message_thread_id: 910,
       },
@@ -2711,7 +2633,7 @@ describe("createBot", () => {
 
     expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Session startup issues"))).toBe(true);
     expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Prompt issue (/prompts/deploy.md): invalid frontmatter"))).toBe(true);
-    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Select a model"))).toBe(true);
+    expect(api.sendMessage.mock.calls.some((call) => String(call[1]).includes("Model switched to"))).toBe(true);
   });
 
   it("re-surfaces startup diagnostics after /handback tears down the context", async () => {
@@ -2815,17 +2737,13 @@ describe("createBot", () => {
         newSession: vi.fn().mockRejectedValue(new Error("bootstrap failed")),
       },
     });
-    await failedModelBootstrap.bot.handleUpdate(createTestUpdate({ message: { text: "/model" } }));
+    await failedModelBootstrap.bot.handleUpdate(createTestUpdate({ message: { text: "/model openai/gpt-4o" } }));
     expect(failedModelBootstrap.api.sendMessage.mock.calls[0]?.[1]).toContain("Failed to create session");
     expect(failedModelBootstrap.api.sendMessage.mock.calls[0]?.[1]).toContain("bootstrap failed");
 
-    const noModels = setupBot({
-      piSessionOverrides: {
-        listModels: vi.fn().mockResolvedValue([]),
-      },
-    });
-    await noModels.bot.handleUpdate(createTestUpdate({ message: { text: "/model" } }));
-    expect(noModels.api.sendMessage.mock.calls[0]?.[1]).toContain("No models available.");
+    const noArgModel = setupBot();
+    await noArgModel.bot.handleUpdate(createTestUpdate({ message: { text: "/model" } }));
+    expect(noArgModel.api.sendMessage.mock.calls[0]?.[1]).toContain("Usage: /model provider/model-id");
   });
 
   it("expires page callbacks when the original picker state is gone", async () => {
@@ -2840,18 +2758,6 @@ describe("createBot", () => {
     await bot.handleUpdate(createCallbackUpdate("newws_page_1"));
     expect(api.answerCallbackQuery).toHaveBeenCalledWith("cb_1", {
       text: "Expired, run /new again",
-    });
-
-    api.answerCallbackQuery.mockClear();
-    await bot.handleUpdate(createCallbackUpdate("model_page_1"));
-    expect(api.answerCallbackQuery).toHaveBeenCalledWith("cb_1", {
-      text: "Expired, run /model again",
-    });
-
-    api.answerCallbackQuery.mockClear();
-    await bot.handleUpdate(createCallbackUpdate("model_show_all"));
-    expect(api.answerCallbackQuery).toHaveBeenCalledWith("cb_1", {
-      text: "Expired, run /model again",
     });
 
     api.answerCallbackQuery.mockClear();
@@ -2907,20 +2813,13 @@ describe("createBot", () => {
       "New session was cancelled.",
     );
 
-    const expiredModel = setupBot();
-    await expiredModel.bot.handleUpdate(createCallbackUpdate("model_0"));
-    expect(expiredModel.api.answerCallbackQuery).toHaveBeenCalledWith("cb_1", {
-      text: "Expired, run /model again",
-    });
-
     const failedModel = setupBot({
       piSessionOverrides: {
         setModel: vi.fn().mockRejectedValue(new Error("model failed")),
       },
     });
-    await failedModel.bot.handleUpdate(createTestUpdate({ message: { text: "/model" } }));
-    await failedModel.bot.handleUpdate(createCallbackUpdate("model_1"));
-    expect(failedModel.api.editMessageText.mock.calls.at(-1)?.[2]).toContain("model failed");
+    await failedModel.bot.handleUpdate(createTestUpdate({ message: { text: "/model openai/model-failed" } }));
+    expect(failedModel.api.sendMessage.mock.calls[0]?.[1]).toContain("model failed");
   });
 
   it("summarizes tool usage, reports tool errors, and handles prompt failures", async () => {
@@ -2993,15 +2892,15 @@ describe("createBot", () => {
     editFallback.api.editMessageText
       .mockRejectedValueOnce(new Error("unsupported start tag"))
       .mockResolvedValue(true);
-    await editFallback.bot.handleUpdate(createTestUpdate({ message: { text: "/model" } }));
-    await editFallback.bot.handleUpdate(createCallbackUpdate("model_1"));
+    await editFallback.bot.handleUpdate(createTestUpdate({ message: { text: "/sessions" } }));
+    await editFallback.bot.handleUpdate(createCallbackUpdate("switch_1"));
     expect(editFallback.api.editMessageText).toHaveBeenCalledTimes(2);
     expect(editFallback.api.editMessageText.mock.calls[1]?.[3]?.parse_mode).toBeUndefined();
 
     const notModified = setupBot();
     notModified.api.editMessageText.mockRejectedValueOnce(new Error("message is not modified"));
-    await notModified.bot.handleUpdate(createTestUpdate({ message: { text: "/model" } }));
-    await notModified.bot.handleUpdate(createCallbackUpdate("model_1"));
+    await notModified.bot.handleUpdate(createTestUpdate({ message: { text: "/sessions" } }));
+    await notModified.bot.handleUpdate(createCallbackUpdate("switch_1"));
     expect(notModified.api.editMessageText).toHaveBeenCalledTimes(1);
 
     const longResponse = setupBot();

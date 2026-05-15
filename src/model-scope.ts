@@ -8,7 +8,7 @@ export interface ScopedModelOption {
   thinkingLevel?: ThinkingLevel;
 }
 
-const THINKING_LEVELS = new Set<ThinkingLevel>(["minimal", "low", "medium", "high", "xhigh"]);
+const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
 export async function resolveScopedModels(
   settingsManager: SettingsManager,
