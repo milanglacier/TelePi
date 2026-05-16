@@ -30,3 +30,27 @@ export function resolvePathFromCwd(filePath: string, cwd: string = process.cwd()
 export function getDefaultTelePiConfigPath(homeDirectory: string = getHomeDirectory()): string {
   return path.join(homeDirectory, DEFAULT_CONFIG_DIRNAME, DEFAULT_CONFIG_FILENAME);
 }
+
+/**
+ * Returns the default systemd user directory path.
+ * Typically ~/.config/systemd/user on Linux.
+ */
+export function getDefaultSystemdUserDir(homeDirectory: string = getHomeDirectory()): string {
+  return path.join(homeDirectory, ".config", "systemd", "user");
+}
+
+/**
+ * Returns the default TelePi log directory for the given platform.
+ * macOS: ~/Library/Logs/TelePi
+ * Linux: ~/.local/state/telepi/logs
+ */
+export function getDefaultLogDir(
+  homeDirectory: string = getHomeDirectory(),
+  platform: "darwin" | "linux",
+): string {
+  if (platform === "darwin") {
+    return path.join(homeDirectory, "Library", "Logs", "TelePi");
+  }
+
+  return path.join(homeDirectory, ".local", "state", "telepi", "logs");
+}

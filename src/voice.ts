@@ -4,6 +4,8 @@ import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 
+import { getPlatformInstallHint } from "./install/platform.js";
+
 export interface TranscriptionResult {
   text: string;
   backend: "parakeet" | "sherpa-onnx" | "openai";
@@ -58,16 +60,16 @@ const SHERPA_ONNX_MODEL_DIR_ENV = "SHERPA_ONNX_MODEL_DIR";
 const SHERPA_ONNX_NUM_THREADS_ENV = "SHERPA_ONNX_NUM_THREADS";
 const SHERPA_MODEL_DOCS_URL =
   "https://k2-fsa.github.io/sherpa/onnx/pretrained_models/offline-transducer/nemo-transducer-models.html";
-const FFMPEG_INSTALL_MESSAGE = "ffmpeg not found. Install it with: brew install ffmpeg";
+const FFMPEG_INSTALL_MESSAGE = `ffmpeg not found. Install it with: ${getPlatformInstallHint("ffmpeg")}`;
 const NO_BACKEND_ERROR = `Voice messages require a transcription backend.
 
 Option 1: Install Parakeet CoreML for local transcription on Apple Silicon (free, private, ~1.5GB download):
   npm install parakeet-coreml
-Also requires ffmpeg: brew install ffmpeg
+Also requires ffmpeg: ${getPlatformInstallHint("ffmpeg")}
 
 Option 2: Install Sherpa-ONNX for local/offline Parakeet transcription on Intel-based Macs, where parakeet-coreml is not supported (also works on Apple Silicon):
   npm install sherpa-onnx-node
-  Also requires ffmpeg: brew install ffmpeg
+  Also requires ffmpeg: ${getPlatformInstallHint("ffmpeg")}
   Download the Intel Mac-friendly Parakeet model from:
     ${SHERPA_MODEL_DOCS_URL}
   Set ${SHERPA_ONNX_MODEL_DIR_ENV}=/path/to/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8

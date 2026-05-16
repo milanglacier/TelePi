@@ -4,6 +4,7 @@ const mockState = vi.hoisted(() => ({
   startBot: vi.fn().mockResolvedValue(undefined),
   setupTelePi: vi.fn().mockResolvedValue({
     context: {
+      platform: "darwin" as const,
       version: "1.2.3",
       configPath: "/tmp/config.env",
       launchAgentPath: "/tmp/com.telepi.plist",
@@ -11,9 +12,12 @@ const mockState = vi.hoisted(() => ({
     },
     configCreated: true,
     configUpdated: false,
+    unitUpdated: true,
     launchAgentUpdated: true,
-    extensionInstalledAs: "symlink",
+    extensionInstalledAs: "symlink" as const,
+    serviceActions: ["bootout", "bootstrap"],
     launchdActions: ["bootout", "bootstrap"],
+    serviceWarning: undefined,
     launchdWarning: undefined,
   }),
   getTelePiStatus: vi.fn().mockReturnValue({
@@ -21,21 +25,31 @@ const mockState = vi.hoisted(() => ({
     resolvedConfigPath: "/tmp/config.env",
     configExists: true,
     configSource: "installed-default",
-    launchAgent: {
+    service: {
+      unitExists: true,
+      plistExists: true,
       loaded: true,
       state: "running",
       pid: 123,
       detail: "loaded",
+      error: undefined,
+    },
+    launchAgent: {
+      unitExists: true,
       plistExists: true,
+      loaded: true,
+      state: "running",
+      pid: 123,
+      detail: "loaded",
       error: undefined,
     },
     extension: {
-      mode: "symlink",
+      mode: "symlink" as const,
       detail: "installed",
       targetPath: "/tmp/telepi-handoff.ts",
     },
   }),
-  resolveTelePiInstallContext: vi.fn().mockReturnValue({ version: "1.2.3" }),
+  resolveTelePiInstallContext: vi.fn().mockReturnValue({ version: "1.2.3", platform: "darwin" }),
 }));
 
 vi.mock("../src/index.js", () => ({ startBot: mockState.startBot }));
@@ -91,9 +105,52 @@ describe("telepi CLI", () => {
     await main(["help"]);
 
     expect(mockState.getTelePiStatus).toHaveBeenCalledTimes(1);
-    expect(mockState.resolveTelePiInstallContext).toHaveBeenCalledTimes(1);
     expect(logSpy.mock.calls.some((call) => String(call[0]).includes("Config path:"))).toBe(true);
     expect(logSpy.mock.calls.some((call) => String(call[0]).includes("TelePi CLI"))).toBe(true);
+  });
+
+  it("uses systemd labels in status output on Linux", () => {
+    mockState.resolveTelePiInstallContext.mockReturnValue({ version: "1.2.3", platform: "linux" });
+    mockState.getTelePiStatus.mockReturnValue({
+      version: "1.2.3",
+      resolvedConfigPath: "/tmp/config.env",
+      configExists: true,
+      configSource: "service-env",
+      service: {
+        unitExists: true,
+        plistExists: false,
+        loaded: true,
+        state: "active",
+        pid: 9999,
+        detail: "loaded",
+        error: undefined,
+      },
+      launchAgent: {
+        unitExists: true,
+        plistExists: false,
+        loaded: true,
+        state: "active",
+        pid: 9999,
+        detail: "loaded",
+        error: undefined,
+      },
+      extension: {
+        mode: "symlink" as const,
+        detail: "symlinked",
+        targetPath: "/tmp/telepi-handoff.ts",
+      },
+    });
+
+    runStatusCommand();
+
+    const output = logSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(output).toContain("systemd:");
+    expect(output).toContain("loaded (active) pid=9999");
+    expect(output).toContain("unit present");
+    expect(output).toContain("systemd TELEPI_CONFIG");
+
+    // Restore mocks for other tests
+    mockState.resolveTelePiInstallContext.mockReturnValue({ version: "1.2.3", platform: "darwin" });
   });
 
   it("validates unexpected arguments and unknown commands", async () => {

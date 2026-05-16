@@ -236,18 +236,11 @@ export function createSessionCommandHandlers(deps: {
       const piContinueCommand = `cd ${shellEscape(workspace)} && pi -c`;
 
       let copiedToClipboard = false;
-      if (process.platform === "darwin") {
-        try {
-          const { spawnSync } = await import("node:child_process");
-          const result = spawnSync("pbcopy", [], {
-            input: piCommand,
-            timeout: 2000,
-            stdio: ["pipe", "ignore", "ignore"],
-          });
-          copiedToClipboard = result.status === 0;
-        } catch {
-          // Ignore clipboard failures.
-        }
+      try {
+        const { copyToClipboard: copyToClipboardUtil } = await import("../../install/clipboard.js");
+        copiedToClipboard = await copyToClipboardUtil(piCommand);
+      } catch {
+        // Ignore clipboard failures.
       }
 
       const plainText = [

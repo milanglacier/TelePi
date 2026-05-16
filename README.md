@@ -24,9 +24,9 @@ TelePi is a Telegram bridge for the [Pi coding agent](https://github.com/badlogi
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
 - Pi installed locally with working credentials in `~/.pi/agent/auth.json`
 
-## Quickstart (npm global install, macOS)
+## Quickstart (npm global install)
 
-This is the main install path for TelePi.
+This is the main install path for TelePi on macOS (`launchd`) and Linux (`systemd --user`).
 
 1. Install TelePi globally:
    ```bash
@@ -52,7 +52,8 @@ This is the main install path for TelePi.
    `telepi setup` will:
    - create or update `~/.config/telepi/config.env`
    - preserve any existing optional config values already present in that file
-   - install/update `~/Library/LaunchAgents/com.telepi.plist`
+   - on macOS, install/update `~/Library/LaunchAgents/com.telepi.plist`
+   - on Linux, install/update `~/.config/systemd/user/telepi.service` and run `systemctl --user daemon-reload && systemctl --user enable --now telepi.service`
    - install the Pi `/handoff` extension at `~/.pi/agent/extensions/telepi-handoff.ts`
 
    If you run setup non-interactively, you must either pass all three positional values or already have them configured; TelePi now fails clearly instead of writing placeholder values.
@@ -72,7 +73,7 @@ This is the main install path for TelePi.
    ```
 5. Open Telegram and send `/start` to your bot.
 
-Rerunning `telepi setup` after upgrades is safe; it refreshes the LaunchAgent and extension while preserving your config. After setup, `/handoff` automatically reuses the installed `launchd` service by default.
+Rerunning `telepi setup` after upgrades is safe; it refreshes the service unit and extension while preserving your config. After setup, `/handoff` automatically reuses the installed `launchd` service on macOS or `systemd --user` service on Linux by default.
 
 ## Development from Source
 
@@ -296,9 +297,10 @@ Pi auto-discovers it after symlinking (or run `/reload` in Pi).
 
 The extension supports three hand-off mode settings, controlled via shell environment variables:
 
-- `TELEPI_HANDOFF_MODE=auto` *(default)* — if `telepi setup` assets are present (`~/.config/telepi/config.env` plus the configured LaunchAgent plist), reuse `launchd`; otherwise use direct mode
-- `TELEPI_HANDOFF_MODE=direct` — always start a fresh direct TelePi process; best for source-checkout development or when the LaunchAgent is unloaded
-- `TELEPI_HANDOFF_MODE=launchd` — force `launchd` hand-off by setting `PI_SESSION_PATH` in the `launchd` user environment and restarting the configured LaunchAgent
+- `TELEPI_HANDOFF_MODE=auto` *(default)* — if `telepi setup` assets are present, reuse `launchd` on macOS or `systemd --user` on Linux; otherwise use direct mode
+- `TELEPI_HANDOFF_MODE=direct` — always start a fresh direct TelePi process; best for source-checkout development or when the installed service is unloaded
+- `TELEPI_HANDOFF_MODE=launchd` — force macOS `launchd` hand-off by setting `PI_SESSION_PATH` in the `launchd` user environment and restarting the configured LaunchAgent
+- `TELEPI_HANDOFF_MODE=systemd` — force Linux `systemd --user` hand-off by setting `PI_SESSION_PATH` in the user service manager and restarting `telepi.service`
 - `TELEPI_LAUNCHD_LABEL` *(optional, default: `com.telepi`)* — LaunchAgent label/plist name to restart in `launchd` mode or auto-detect
 
 #### Direct mode
@@ -335,6 +337,29 @@ In `launchd` mode, `/handoff` only does two things: set `PI_SESSION_PATH` in `la
 
 > **Note:** `telepi setup` installs the plist with `KeepAlive`, so launchd will restart TelePi if it exits. To fully stop TelePi, unload the agent: `launchctl bootout gui/$UID/com.telepi`.
 
+#### systemd mode (default after `telepi setup` on Linux)
+
+On Linux, `telepi setup` installs a user service at `~/.config/systemd/user/telepi.service`, reloads the user daemon, enables the service, and starts/restarts it. `/handoff` auto-detects that service and runs:
+
+```bash
+systemctl --user set-environment PI_SESSION_PATH=/path/to/session.jsonl
+systemctl --user restart telepi.service
+```
+
+If `systemctl --user` is unavailable, make sure your distro has user systemd sessions enabled. On headless servers you may need lingering:
+
+```bash
+loginctl enable-linger "$USER"
+```
+
+Useful commands:
+
+```bash
+systemctl --user status telepi.service
+journalctl --user -u telepi.service -f
+systemctl --user stop telepi.service
+```
+
 ### Telegram → CLI (`/handback`)
 
 You're on your phone and want to get back to your terminal:
@@ -344,7 +369,7 @@ You're on your phone and want to get back to your terminal:
    ```
    cd '/Users/you/myproject' && pi --session '/Users/you/.pi/agent/sessions/.../session.jsonl'
    ```
-3. On macOS, the command is **copied to your clipboard** automatically
+3. On macOS and Linux desktops with `wl-copy`, `xclip`, or `xsel`, the command is **copied to your clipboard** automatically
 4. **In your terminal**, paste and run — Pi CLI opens with the full conversation, including everything from Telegram
 5. TelePi stays alive — send any message in Telegram to start a fresh session
 
@@ -403,10 +428,17 @@ Installed mode (`telepi setup`) creates or manages these user-level files:
 ~/.config/telepi/
 └── config.env                     ← generated from .env.example and updated by telepi setup
 
-~/Library/LaunchAgents/
+~/Library/LaunchAgents/            (macOS)
 └── com.telepi.plist              ← launchd service generated by telepi setup
 
-~/Library/Logs/TelePi/
+~/.config/systemd/user/            (Linux)
+└── telepi.service                 ← systemd user service generated by telepi setup
+
+~/Library/Logs/TelePi/             (macOS)
+├── telepi.out.log
+└── telepi.err.log
+
+~/.local/state/telepi/logs/        (Linux)
 ├── telepi.out.log
 └── telepi.err.log
 
@@ -428,6 +460,8 @@ TelePi/
 │   └── telepi-handoff.ts         ← Pi CLI extension source
 ├── launchd/
 │   └── com.telepi.plist          ← launchd template used by telepi setup
+├── systemd/
+│   └── telepi.service            ← systemd user-service template used by telepi setup
 ├── scripts/
 │   └── package-release.mjs       ← builds release tarballs + sha256 checksums
 ├── src/
@@ -451,6 +485,9 @@ TelePi/
 │   │   ├── config.ts             ← config-file setup/update helpers
 │   │   ├── extension.ts          ← extension install/status helpers
 │   │   ├── launchd.ts            ← LaunchAgent plist and launchctl helpers
+│   │   ├── platform.ts           ← platform detection and install context resolution
+│   │   ├── service-manager.ts    ← shared launchd/systemd service manager interface
+│   │   ├── systemd.ts            ← systemd unit and systemctl helpers
 │   │   └── shared.ts             ← shared install types/constants
 │   ├── model-scope.ts            ← model filtering and grouping
 │   ├── pi-session.ts             ← Pi SDK session wrapper

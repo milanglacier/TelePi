@@ -6,17 +6,19 @@ import { resolvePathFromCwd } from "../paths.js";
 import type {
   LaunchAgentStatus,
   LaunchctlResult,
+  ServiceStatus,
   TelePiInstallContext,
 } from "./shared.js";
+import type { ServiceManager } from "./service-manager.js";
 
 export function buildLaunchAgentPlist(context: TelePiInstallContext): string {
-  const template = readFileSync(context.launchdTemplatePath, "utf8");
+  const template = readFileSync(context.launchdTemplatePath!, "utf8");
   const replacements: Array<[string, string]> = [
     ["/ABSOLUTE/PATH/TO/WORKDIR", escapeXml(context.workingDirectory)],
     ["/ABSOLUTE/PATH/TO/node", escapeXml(context.nodeExecutablePath)],
     ["/ABSOLUTE/PATH/TO/TelePi/dist/cli.js", escapeXml(context.cliEntrypointPath)],
-    ["/ABSOLUTE/PATH/TO/telepi.out.log", escapeXml(context.launchAgentStdoutPath)],
-    ["/ABSOLUTE/PATH/TO/telepi.err.log", escapeXml(context.launchAgentStderrPath)],
+    ["/ABSOLUTE/PATH/TO/telepi.out.log", escapeXml(context.launchAgentStdoutPath!)],
+    ["/ABSOLUTE/PATH/TO/telepi.err.log", escapeXml(context.launchAgentStderrPath!)],
     ["__TELEPI_PATH_ENV_BLOCK__", buildEnvironmentVariablesBlock(context)],
   ];
 
@@ -28,15 +30,15 @@ export function buildLaunchAgentPlist(context: TelePiInstallContext): string {
 
 export function writeLaunchAgentPlist(context: TelePiInstallContext): boolean {
   const nextContents = buildLaunchAgentPlist(context);
-  const previousContents = existsSync(context.launchAgentPath)
-    ? readFileSync(context.launchAgentPath, "utf8")
+  const previousContents = existsSync(context.launchAgentPath!)
+    ? readFileSync(context.launchAgentPath!, "utf8")
     : undefined;
 
   if (previousContents === nextContents) {
     return false;
   }
 
-  writeFileSync(context.launchAgentPath, nextContents, "utf8");
+  writeFileSync(context.launchAgentPath!, nextContents, "utf8");
   return true;
 }
 
@@ -66,13 +68,13 @@ export function reconcileLaunchAgent(context: TelePiInstallContext): {
     };
   }
 
-  runCommand("launchctl", ["bootout", context.launchAgentDomain, context.launchAgentPath]);
-  actions.push(`bootout ${context.launchAgentDomain} ${context.launchAgentPath}`);
+  runCommand("launchctl", ["bootout", context.launchAgentDomain, context.launchAgentPath!]);
+  actions.push(`bootout ${context.launchAgentDomain} ${context.launchAgentPath!}`);
 
   const bootstrap = runCommand("launchctl", [
     "bootstrap",
     context.launchAgentDomain,
-    context.launchAgentPath,
+    context.launchAgentPath!,
   ]);
   if (bootstrap.status !== 0) {
     return {
@@ -80,7 +82,7 @@ export function reconcileLaunchAgent(context: TelePiInstallContext): {
       warning: formatLaunchctlFailure("bootstrap", bootstrap),
     };
   }
-  actions.push(`bootstrap ${context.launchAgentDomain} ${context.launchAgentPath}`);
+  actions.push(`bootstrap ${context.launchAgentDomain} ${context.launchAgentPath!}`);
 
   const enable = runCommand("launchctl", ["enable", context.launchAgentServiceTarget]);
   if (enable.status === 0) {
@@ -99,11 +101,12 @@ export function reconcileLaunchAgent(context: TelePiInstallContext): {
   };
 }
 
-export function getLaunchAgentStatus(context: TelePiInstallContext): LaunchAgentStatus {
-  const plistExists = existsSync(context.launchAgentPath);
+export function getLaunchAgentStatus(context: TelePiInstallContext): ServiceStatus {
+  const plistExists = context.launchAgentPath ? existsSync(context.launchAgentPath) : false;
 
   if (process.platform !== "darwin") {
     return {
+      unitExists: plistExists,
       plistExists,
       loaded: false,
       state: undefined,
@@ -115,6 +118,7 @@ export function getLaunchAgentStatus(context: TelePiInstallContext): LaunchAgent
 
   if (!context.launchAgentServiceTarget) {
     return {
+      unitExists: plistExists,
       plistExists,
       loaded: false,
       state: undefined,
@@ -127,6 +131,7 @@ export function getLaunchAgentStatus(context: TelePiInstallContext): LaunchAgent
   const result = runCommand("launchctl", ["print", context.launchAgentServiceTarget]);
   if (result.error) {
     return {
+      unitExists: plistExists,
       plistExists,
       loaded: false,
       state: undefined,
@@ -138,6 +143,7 @@ export function getLaunchAgentStatus(context: TelePiInstallContext): LaunchAgent
 
   if (result.status !== 0) {
     return {
+      unitExists: plistExists,
       plistExists,
       loaded: false,
       state: undefined,
@@ -149,6 +155,7 @@ export function getLaunchAgentStatus(context: TelePiInstallContext): LaunchAgent
 
   const output = `${result.stdout}\n${result.stderr}`;
   return {
+    unitExists: plistExists,
     plistExists,
     loaded: true,
     state: matchValue(output, /\bstate = ([^\n]+)/),
@@ -159,7 +166,7 @@ export function getLaunchAgentStatus(context: TelePiInstallContext): LaunchAgent
 }
 
 export function readLaunchAgentPlist(context: TelePiInstallContext): string | undefined {
-  if (!existsSync(context.launchAgentPath)) {
+  if (!context.launchAgentPath || !existsSync(context.launchAgentPath)) {
     return undefined;
   }
 
@@ -322,4 +329,14 @@ function escapeXml(value: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&apos;");
+}
+
+/** Creates a ServiceManager wrapping the existing launchd helpers. */
+export function createLaunchdManager(): ServiceManager {
+  return {
+    buildUnitFile: buildLaunchAgentPlist,
+    writeUnitFile: writeLaunchAgentPlist,
+    reconcile: reconcileLaunchAgent,
+    getStatus: getLaunchAgentStatus,
+  };
 }

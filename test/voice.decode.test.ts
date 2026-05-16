@@ -18,7 +18,10 @@ function createSpawnMock(onSpawn: (child: FakeChildProcess) => void) {
 
 async function importVoiceWithSpawn(spawnMock: ReturnType<typeof createSpawnMock>) {
   vi.resetModules();
-  vi.doMock("node:child_process", () => ({ spawn: spawnMock }));
+  vi.doMock("node:child_process", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("node:child_process")>();
+    return { ...actual, spawn: spawnMock };
+  });
   return await import("../src/voice.js");
 }
 
@@ -122,6 +125,6 @@ describe("voice decoding", () => {
       },
     }));
 
-    await expect(voice.transcribeAudio("/tmp/missing.ogg")).rejects.toThrow("brew install ffmpeg");
+    await expect(voice.transcribeAudio("/tmp/missing.ogg")).rejects.toThrow("ffmpeg");
   });
 });

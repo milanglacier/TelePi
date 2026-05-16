@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { getPlatformInstallHint } from "../src/install/platform.js";
 import {
   _resetImportHook,
   _setDecodeHook,
@@ -333,7 +334,7 @@ describe("voice transcription", () => {
 
     await expect(transcribeAudio(audioPath)).rejects.toThrow("Voice messages require a transcription backend.");
     await expect(transcribeAudio(audioPath)).rejects.toThrow("npm install parakeet-coreml");
-    await expect(transcribeAudio(audioPath)).rejects.toThrow("brew install ffmpeg");
+    await expect(transcribeAudio(audioPath)).rejects.toThrow("ffmpeg");
     await expect(transcribeAudio(audioPath)).rejects.toThrow("sherpa-onnx-node");
     await expect(transcribeAudio(audioPath)).rejects.toThrow("SHERPA_ONNX_MODEL_DIR");
     await expect(transcribeAudio(audioPath)).rejects.toThrow("OPENAI_API_KEY=sk-");
@@ -589,7 +590,7 @@ describe("voice transcription", () => {
       throw new Error("ffmpeg not found. Install it with: brew install ffmpeg");
     });
 
-    await expect(transcribeAudio(audioPath)).rejects.toThrow("brew install ffmpeg");
+    await expect(transcribeAudio(audioPath)).rejects.toThrow("ffmpeg");
   });
 
   it("propagates parakeet engine initialization failures", async () => {

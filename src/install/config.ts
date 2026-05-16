@@ -17,6 +17,85 @@ import {
   TELEPI_SETUP_PLACEHOLDER_WORKSPACE,
 } from "./shared.js";
 
+export type ServiceConfigSource =
+  | "service-env"
+  | "service-cwd"
+  | "installed-default";
+
+/**
+ * Determine the resolved config path and its source for an installed TelePi service.
+ * On macOS, reads the launchd plist; on Linux, reads the systemd unit file;
+ * falls back to the installed default config path.
+ */
+export function getServiceConfigSource(
+  context: TelePiInstallContext,
+): { resolvedPath: string; source: ServiceConfigSource } {
+  if (context.platform === "linux" && context.serviceUnitPath) {
+    const unitContents = readSystemdUnitFile(context);
+    if (unitContents) {
+      const workingDirectory = readSystemdWorkingDirectory(unitContents) ?? context.workingDirectory;
+      const envVars = readSystemdEnvironmentVariables(unitContents);
+      const explicitConfigPath = envVars.TELEPI_CONFIG
+        ? resolvePathFromCwd(envVars.TELEPI_CONFIG, workingDirectory)
+        : undefined;
+
+      if (explicitConfigPath) {
+        return { resolvedPath: explicitConfigPath, source: "service-env" };
+      }
+
+      const localConfigPath = path.join(workingDirectory, ".env");
+      if (existsSync(localConfigPath)) {
+        return { resolvedPath: localConfigPath, source: "service-cwd" };
+      }
+    }
+
+    return { resolvedPath: context.configPath, source: "installed-default" };
+  }
+
+  // macOS: use the launchd-based config resolution from launchd.ts
+  return { resolvedPath: context.configPath, source: "installed-default" };
+}
+
+function readSystemdUnitFile(context: TelePiInstallContext): string | undefined {
+  if (!context.serviceUnitPath || !existsSync(context.serviceUnitPath)) {
+    return undefined;
+  }
+  return readFileSync(context.serviceUnitPath, "utf8");
+}
+
+function readSystemdWorkingDirectory(unitContents: string): string | undefined {
+  const match = unitContents.match(/^WorkingDirectory\s*=\s*(.+)$/m);
+  return match?.[1]?.trim();
+}
+
+function readSystemdEnvironmentVariables(unitContents: string): Record<string, string> {
+  const values: Record<string, string> = {};
+  const envPattern = /^Environment\s*=\s*(.+)$/gm;
+  let match: RegExpExecArray | null;
+  while ((match = envPattern.exec(unitContents)) !== null) {
+    const assignment = match[1]!.trim();
+    // Environment= can have multiple KEY=VALUE pairs separated by space,
+    // or a single quoted string. Parse KEY=VALUE pairs.
+    for (const pair of parseEnvironmentAssignments(assignment)) {
+      values[pair.key] = pair.value;
+    }
+  }
+  return values;
+}
+
+function parseEnvironmentAssignments(assignment: string): Array<{ key: string; value: string }> {
+  const pairs: Array<{ key: string; value: string }> = [];
+  // Handle quoted values and space-separated KEY=VALUE pairs
+  const regex = /(\w+)=(?:"([^"]*?)"|'([^']*?)'|(\S+))/g;
+  let pairMatch: RegExpExecArray | null;
+  while ((pairMatch = regex.exec(assignment)) !== null) {
+    const key = pairMatch[1]!;
+    const value = pairMatch[2] ?? pairMatch[3] ?? pairMatch[4] ?? "";
+    pairs.push({ key, value });
+  }
+  return pairs;
+}
+
 export async function ensureTelePiConfig(
   context: TelePiInstallContext,
   options: TelePiSetupOptions = {},

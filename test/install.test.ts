@@ -10,6 +10,7 @@ import {
   resolveTelePiInstallContext,
   setupTelePi,
 } from "../src/install.js";
+import { getServiceConfigSource } from "../src/install/config.js";
 
 describe("install helpers", () => {
   const originalCwd = process.cwd();
@@ -27,6 +28,7 @@ describe("install helpers", () => {
     mkdirSync(homeDir, { recursive: true });
     mkdirSync(path.join(packageRoot, "dist"), { recursive: true });
     mkdirSync(path.join(packageRoot, "launchd"), { recursive: true });
+    mkdirSync(path.join(packageRoot, "systemd"), { recursive: true });
     mkdirSync(path.join(packageRoot, "extensions"), { recursive: true });
 
     writeFileSync(path.join(packageRoot, "package.json"), '{"version":"9.9.9"}\n');
@@ -55,6 +57,28 @@ describe("install helpers", () => {
     );
     writeFileSync(path.join(packageRoot, "extensions", "telepi-handoff.ts"), "export default {};\n");
     writeFileSync(path.join(packageRoot, "dist", "cli.js"), "#!/usr/bin/env node\n");
+    writeFileSync(
+      path.join(packageRoot, "systemd", "telepi.service"),
+      [
+        "[Unit]",
+        "Description=TelePi Telegram Bot",
+        "After=network.target",
+        "",
+        "[Service]",
+        "Type=simple",
+        "WorkingDirectory=__TELEPI_WORKDIR__",
+        "ExecStart=__TELEPI_NODE_PATH__ __TELEPI_CLI_PATH__ start",
+        "Environment=TELEPI_CONFIG=__TELEPI_CONFIG__",
+        "Environment=PATH=__TELEPI_PATH_ENV__",
+        "StandardOutput=append:__TELEPI_LOG_DIR__/telepi.out.log",
+        "StandardError=append:__TELEPI_LOG_DIR__/telepi.err.log",
+        "Restart=on-failure",
+        "RestartSec=5",
+        "",
+        "[Install]",
+        "WantedBy=default.target",
+      ].join("\n"),
+    );
 
     process.chdir(packageRoot);
     process.env = {
@@ -74,11 +98,13 @@ describe("install helpers", () => {
     vi.restoreAllMocks();
   });
 
-  it("resolves installed-mode paths from the CLI entrypoint", () => {
+  it("resolves installed-mode paths from the CLI entrypoint on macOS", () => {
+    Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
     const cliModuleUrl = pathToFileURL(path.join(packageRoot, "dist", "cli.js")).href;
 
     const context = resolveTelePiInstallContext(cliModuleUrl);
 
+    expect(context.platform).toBe("darwin");
     expect(context.packageRoot).toBe(packageRoot);
     expect(context.cliEntrypointPath).toBe(path.join(packageRoot, "dist", "cli.js"));
     expect(context.configPath).toBe(path.join(homeDir, ".config", "telepi", "config.env"));
@@ -92,6 +118,7 @@ describe("install helpers", () => {
   });
 
   it("renders a launchd plist that starts the CLI via node", () => {
+    Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
     const cliModuleUrl = pathToFileURL(path.join(packageRoot, "dist", "cli.js")).href;
     const context = resolveTelePiInstallContext(cliModuleUrl);
 
@@ -284,18 +311,22 @@ describe("install helpers", () => {
   });
 
   it("reports the launchd TELEPI_CONFIG path instead of the caller cwd", () => {
+    Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
     const cliModuleUrl = pathToFileURL(path.join(packageRoot, "dist", "cli.js")).href;
     const context = resolveTelePiInstallContext(cliModuleUrl);
     const callerCwd = path.join(tempDir, "caller-cwd");
 
     mkdirSync(callerCwd, { recursive: true });
     mkdirSync(path.dirname(context.configPath), { recursive: true });
-    mkdirSync(path.dirname(context.launchAgentPath), { recursive: true });
+    if (context.launchAgentPath) {
+      mkdirSync(path.dirname(context.launchAgentPath), { recursive: true });
+    }
     writeFileSync(path.join(callerCwd, ".env"), "TELEGRAM_BOT_TOKEN=from-caller\n");
     writeFileSync(context.configPath, "TELEGRAM_BOT_TOKEN=from-installed\n");
-    writeFileSync(context.launchAgentPath, buildLaunchAgentPlist(context));
+    if (context.launchAgentPath) {
+      writeFileSync(context.launchAgentPath, buildLaunchAgentPlist(context));
+    }
     process.chdir(callerCwd);
-    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
 
     const status = getTelePiStatus(cliModuleUrl);
 
@@ -346,6 +377,119 @@ describe("install helpers", () => {
     await expect(setupTelePi(pathToFileURL(srcCliPath).href)).rejects.toThrow(
       `telepi setup requires a built CLI entrypoint at ${path.join(packageRoot, "dist", "cli.js")}`,
     );
+  });
+
+  // --- Linux-specific tests ---
+
+  it("resolves Linux context with systemd fields and no launchd fields", () => {
+    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+    const cliModuleUrl = pathToFileURL(path.join(packageRoot, "dist", "cli.js")).href;
+
+    const context = resolveTelePiInstallContext(cliModuleUrl);
+
+    expect(context.platform).toBe("linux");
+    // Linux-specific fields populated
+    expect(context.systemdTemplatePath).toContain("telepi.service");
+    expect(context.serviceUnitPath).toContain(".config/systemd/user/telepi.service");
+    expect(context.serviceUnitName).toBe("telepi");
+    expect(context.serviceUnitLogsDirectory).toContain(".local/state/telepi/logs");
+    expect(context.serviceUnitStdoutPath).toContain("telepi.out.log");
+    expect(context.serviceUnitStderrPath).toContain("telepi.err.log");
+    // macOS fields NOT populated on Linux
+    expect(context.launchdTemplatePath).toBeUndefined();
+    expect(context.launchAgentPath).toBeUndefined();
+    expect(context.launchAgentLabel).toBeUndefined();
+  });
+
+  it("resolves macOS context with launchd fields and no systemd fields", () => {
+    Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
+    const cliModuleUrl = pathToFileURL(path.join(packageRoot, "dist", "cli.js")).href;
+
+    const context = resolveTelePiInstallContext(cliModuleUrl);
+
+    expect(context.platform).toBe("darwin");
+    expect(context.launchdTemplatePath).toContain("com.telepi.plist");
+    expect(context.launchAgentPath).toContain("LaunchAgents/com.telepi.plist");
+    expect(context.launchAgentLabel).toBe("com.telepi");
+    // Linux fields NOT populated on macOS
+    expect(context.systemdTemplatePath).toBeUndefined();
+    expect(context.serviceUnitPath).toBeUndefined();
+    expect(context.serviceUnitName).toBeUndefined();
+  });
+
+  it("throws for unsupported platforms", () => {
+    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+    const cliModuleUrl = pathToFileURL(path.join(packageRoot, "dist", "cli.js")).href;
+
+    expect(() => resolveTelePiInstallContext(cliModuleUrl)).toThrow(
+      "telepi setup is only supported on macOS and Linux",
+    );
+  });
+
+  it("getTelePiStatus on Linux returns service field with systemd status", () => {
+    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+    const cliModuleUrl = pathToFileURL(path.join(packageRoot, "dist", "cli.js")).href;
+
+    const status = getTelePiStatus(cliModuleUrl);
+
+    expect(status.service).toBeDefined();
+    expect(status.service.unitExists).toBe(false); // service not installed yet
+    expect(status.service.loaded).toBe(false);
+    // field names are platform-neutral
+    expect(status.configSource).toBe("installed-default");
+    expect(status.extension.mode).toBe("missing");
+  });
+
+  it("getServiceConfigSource returns service-env when TELEPI_CONFIG is in systemd unit", () => {
+    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+    const cliModuleUrl = pathToFileURL(path.join(packageRoot, "dist", "cli.js")).href;
+    const ctx = resolveTelePiInstallContext(cliModuleUrl);
+
+    // Write a systemd unit file with explicit TELEPI_CONFIG
+    if (ctx.serviceUnitPath) {
+      mkdirSync(path.dirname(ctx.serviceUnitPath), { recursive: true });
+      writeFileSync(ctx.serviceUnitPath, [
+        "[Service]",
+        `Environment=TELEPI_CONFIG=${ctx.configPath}`,
+        `WorkingDirectory=${ctx.workingDirectory}`,
+      ].join("\n"));
+    }
+
+    const info = getServiceConfigSource(ctx);
+    expect(info.source).toBe("service-env");
+    expect(info.resolvedPath).toBe(ctx.configPath);
+  });
+
+  it("getServiceConfigSource returns service-cwd when .env exists in working dir", () => {
+    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+    const cliModuleUrl = pathToFileURL(path.join(packageRoot, "dist", "cli.js")).href;
+    const ctx = resolveTelePiInstallContext(cliModuleUrl);
+
+    // Write a unit file without TELEPI_CONFIG, but with .env in working dir
+    if (ctx.serviceUnitPath) {
+      mkdirSync(path.dirname(ctx.serviceUnitPath), { recursive: true });
+      writeFileSync(ctx.serviceUnitPath, [
+        "[Service]",
+        `WorkingDirectory=${ctx.workingDirectory}`,
+      ].join("\n"));
+    }
+    writeFileSync(path.join(ctx.workingDirectory, ".env"), "TELEGRAM_BOT_TOKEN=test\n");
+
+    const info = getServiceConfigSource(ctx);
+    expect(info.source).toBe("service-cwd");
+    expect(info.resolvedPath).toBe(path.join(ctx.workingDirectory, ".env"));
+  });
+
+  it("getServiceConfigSource returns installed-default when no unit or .env exists", () => {
+    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+    const cliModuleUrl = pathToFileURL(path.join(packageRoot, "dist", "cli.js")).href;
+    const ctx = resolveTelePiInstallContext(cliModuleUrl);
+    // Don't create any service unit file
+    ctx.serviceUnitPath = path.join(tmpdir(), "nonexistent", "telepi.service");
+
+    const info = getServiceConfigSource(ctx);
+    expect(info.source).toBe("installed-default");
+    expect(info.resolvedPath).toBe(ctx.configPath);
   });
 });
 

@@ -34,6 +34,7 @@
     "dist",
     "extensions/telepi-handoff.ts",
     "launchd/com.telepi.plist",
+    "systemd/telepi.service",
     "README.md",
     ".env.example",
     "LICENSE"

@@ -8,9 +8,9 @@ const HELP_TEXT = `TelePi CLI
 Usage:
   telepi                              Start the bot
   telepi start                        Start the bot
-  telepi setup                        Interactive macOS setup (TTY only)
+  telepi setup                        Interactive setup (TTY only)
   telepi setup <bot_token> <userids> <workspace>
-                                      Fast macOS setup without prompts
+                                      Fast setup without prompts
   telepi status                       Show installed-mode status
   telepi version                      Print the TelePi version
   telepi help                         Show this help
@@ -72,46 +72,67 @@ export async function runSetupCommand(args: string[]): Promise<void> {
       ? "updated"
       : "unchanged";
 
+  const platform = result.context.platform;
+  const serviceLabel = platform === "linux" ? "Service" : "LaunchAgent";
+
   console.log(`TelePi ${result.context.version}`);
   console.log(`Config: ${result.context.configPath} (${configState})`);
-  console.log(
-    `LaunchAgent: ${result.context.launchAgentPath} (${result.launchAgentUpdated ? "updated" : "unchanged"})`,
-  );
+
+  if (platform === "linux" && result.context.serviceUnitPath) {
+    console.log(
+      `Service: ${result.context.serviceUnitPath} (${result.unitUpdated ? "updated" : "unchanged"})`,
+    );
+  } else if (platform === "darwin" && result.context.launchAgentPath) {
+    console.log(
+      `${serviceLabel}: ${result.context.launchAgentPath} (${result.unitUpdated ? "updated" : "unchanged"})`,
+    );
+  }
+
   console.log(
     `Extension: ${result.context.extensionDestinationPath} (${result.extensionInstalledAs})`,
   );
 
-  if (result.launchdActions.length > 0) {
-    console.log(`launchd: ${result.launchdActions.join(" -> ")}`);
+  if (result.serviceActions.length > 0) {
+    const actionLabel = platform === "linux" ? "systemctl" : "launchd";
+    console.log(`${actionLabel}: ${result.serviceActions.join(" -> ")}`);
   }
-  if (result.launchdWarning) {
-    console.warn(`launchd warning: ${result.launchdWarning}`);
+  if (result.serviceWarning) {
+    const warningLabel = platform === "linux" ? "systemd" : "launchd";
+    console.warn(`${warningLabel} warning: ${result.serviceWarning}`);
   }
 }
 
 export function runStatusCommand(): void {
   const status = getTelePiStatus(import.meta.url);
-  const configSourceLabels: Record<typeof status.configSource, string> = {
+  const platform = resolveTelePiInstallContext(import.meta.url).platform;
+
+  const configSourceLabels: Record<string, string> = {
+    "service-env": platform === "linux" ? "systemd TELEPI_CONFIG" : "launchd TELEPI_CONFIG",
+    "service-cwd": platform === "linux" ? "systemd working-directory .env" : "launchd working-directory .env",
     "launchd-env": "launchd TELEPI_CONFIG",
     "launchd-cwd": "launchd working-directory .env",
     "installed-default": "installed default",
   };
-  const launchdSummary = status.launchAgent.loaded
-    ? `loaded${status.launchAgent.state ? ` (${status.launchAgent.state})` : ""}${status.launchAgent.pid ? ` pid=${status.launchAgent.pid}` : ""}`
-    : status.launchAgent.detail;
+
+  const serviceSummary = status.service.loaded
+    ? `loaded${status.service.state ? ` (${status.service.state})` : ""}${status.service.pid ? ` pid=${status.service.pid}` : ""}`
+    : status.service.detail;
+
   const extensionSummary =
     status.extension.mode === "symlink" && status.extension.targetPath
       ? `${status.extension.detail} -> ${status.extension.targetPath}`
       : status.extension.detail;
 
+  const serviceLabel = platform === "linux" ? "systemd" : "launchd";
+  const unitLabel = platform === "linux" ? "unit" : "plist";
+  const unitPresent = status.service.unitExists ? `${unitLabel} present` : `${unitLabel} missing`;
+
   console.log(`TelePi ${status.version}`);
-  console.log(`Config path: ${status.resolvedConfigPath} [${configSourceLabels[status.configSource]}]`);
+  console.log(`Config path: ${status.resolvedConfigPath} [${configSourceLabels[status.configSource] ?? status.configSource}]`);
   console.log(`Config exists: ${status.configExists ? "yes" : "no"}`);
-  console.log(
-    `launchd: ${launchdSummary} (${status.launchAgent.plistExists ? "plist present" : "plist missing"})`,
-  );
-  if (status.launchAgent.error) {
-    console.log(`launchd detail: ${status.launchAgent.error}`);
+  console.log(`${serviceLabel}: ${serviceSummary} (${unitPresent})`);
+  if (status.service.error) {
+    console.log(`${serviceLabel} detail: ${status.service.error}`);
   }
   console.log(`Extension: ${extensionSummary}`);
 }
