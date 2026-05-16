@@ -61,6 +61,7 @@ export interface AutonomousCallbacks {
   onAutonomousStart(): void;
   onAutonomousTextDelta(delta: string): void;
   onAutonomousToolStart(toolName: string, toolCallId: string): void;
+  onAutonomousToolUpdate(toolCallId: string, partialResult: string): void;
   onAutonomousToolEnd(toolCallId: string, isError: boolean): void;
   onAutonomousEnd(): void;
 }
@@ -1221,6 +1222,20 @@ export class PiSessionService {
     let inAutonomousTurn = false;
 
     const unsub = this.getSession().subscribe((event) => {
+      // Always reset inAutonomousTurn on agent_end to keep state accurate,
+      // even when a prompt flow is active and aborts the autonomous turn.
+      // Without this, the flag stays stale and the next autonomous turn
+      // skips onAutonomousStart(), mixing content from the previous turn.
+      if (event.type === "agent_end") {
+        if (inAutonomousTurn) {
+          inAutonomousTurn = false;
+          if (!this.isPromptFlowActiveFlag) {
+            callbacks.onAutonomousEnd();
+          }
+        }
+        return;
+      }
+
       if (this.isPromptFlowActiveFlag) {
         return;
       }
@@ -1242,14 +1257,14 @@ export class PiSessionService {
           }
           callbacks.onAutonomousToolStart(event.toolName, event.toolCallId);
           break;
+        case "tool_execution_update":
+          callbacks.onAutonomousToolUpdate(
+            event.toolCallId,
+            stringifyToolData(event.partialResult),
+          );
+          break;
         case "tool_execution_end":
           callbacks.onAutonomousToolEnd(event.toolCallId, event.isError);
-          break;
-        case "agent_end":
-          if (inAutonomousTurn) {
-            inAutonomousTurn = false;
-            callbacks.onAutonomousEnd();
-          }
           break;
         default:
           break;
@@ -1335,24 +1350,6 @@ export class PiSessionRegistry {
 
   get(context: PiSessionContext): PiSessionService | undefined {
     return this.services.get(getPiSessionContextKey(context));
-  }
-
-  getBySessionId(sessionId: string): PiSessionContext | undefined {
-    for (const [key, service] of this.services) {
-      try {
-        if (service.hasActiveSession() && service.getInfo().sessionId === sessionId) {
-          const [chatIdStr, threadIdStr] = key.split("::");
-          const chatId = Number(chatIdStr) || chatIdStr;
-          if (threadIdStr === "root") {
-            return { chatId };
-          }
-          return { chatId, messageThreadId: Number(threadIdStr) };
-        }
-      } catch {
-        // Service may be disposed or in invalid state during iteration.
-      }
-    }
-    return undefined;
   }
 
   getInfo(context: PiSessionContext): PiSessionInfo {

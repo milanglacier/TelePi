@@ -1974,6 +1974,7 @@ describe("PiSessionService", () => {
       onAutonomousStart,
       onAutonomousTextDelta,
       onAutonomousToolStart,
+      onAutonomousToolUpdate: vi.fn(),
       onAutonomousToolEnd,
       onAutonomousEnd,
     });
@@ -2011,6 +2012,53 @@ describe("PiSessionService", () => {
     emit?.({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Resume" } });
     expect(onAutonomousStart).toHaveBeenCalledTimes(1);
     expect(onAutonomousTextDelta).toHaveBeenCalledWith("Resume");
+  });
+
+  it("resets autonomous turn state on agent_end even during prompt flow", async () => {
+    // Bug #1: When a prompt flow interrupts an autonomous turn mid-stream,
+    // the inAutonomousTurn flag must be reset so the next autonomous turn
+    // correctly triggers onAutonomousStart. Without this fix, the stale
+    // flag causes content mixing from the previous autonomous turn.
+    const service = await PiSessionService.create(createConfig());
+    const currentSession = mockState.createdSessions[0]?.session;
+
+    const onAutonomousStart = vi.fn();
+    const onAutonomousTextDelta = vi.fn();
+    const onAutonomousEnd = vi.fn();
+
+    service.subscribeAutonomous({
+      onAutonomousStart,
+      onAutonomousTextDelta,
+      onAutonomousToolStart: vi.fn(),
+      onAutonomousToolUpdate: vi.fn(),
+      onAutonomousToolEnd: vi.fn(),
+      onAutonomousEnd,
+    });
+
+    const emit = mockState.getSubscriber(currentSession);
+
+    // 1. Start an autonomous turn (inAutonomousTurn becomes true)
+    emit?.({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Auto" } });
+    expect(onAutonomousStart).toHaveBeenCalledTimes(1);
+
+    // 2. Prompt flow becomes active, aborting the autonomous turn
+    service.setPromptFlowActive(true);
+    onAutonomousStart.mockClear();
+    onAutonomousTextDelta.mockClear();
+
+    // 3. agent_end fires during prompt flow (autonomous turn aborted)
+    //    The flag MUST be reset, but onAutonomousEnd should NOT fire
+    emit?.({ type: "agent_end" });
+    expect(onAutonomousEnd).not.toHaveBeenCalled();
+
+    // 4. Prompt flow ends
+    service.setPromptFlowActive(false);
+
+    // 5. A new autonomous turn starts — onAutonomousStart MUST fire
+    //    because inAutonomousTurn was correctly reset in step 3
+    emit?.({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Fresh" } });
+    expect(onAutonomousStart).toHaveBeenCalledTimes(1);
+    expect(onAutonomousTextDelta).toHaveBeenCalledWith("Fresh");
   });
 
   it("reloads auth storage before prompting", async () => {
@@ -2177,21 +2225,4 @@ describe("PiSessionService", () => {
     expect(registry.get({ chatId: 11, messageThreadId: 4 })).toBeUndefined();
   });
 
-  it("resolves PiSessionContext by session ID", async () => {
-    const registry = await PiSessionRegistry.create(createConfig());
-    await registry.getOrCreate({ chatId: 42, messageThreadId: 7 });
-
-    const target = registry.getBySessionId("session-1");
-    expect(target).toEqual({ chatId: 42, messageThreadId: 7 });
-
-    expect(registry.getBySessionId("unknown-session")).toBeUndefined();
-  });
-
-  it("resolves PiSessionContext for chats without messageThreadId", async () => {
-    const registry = await PiSessionRegistry.create(createConfig());
-    await registry.getOrCreate({ chatId: 99 });
-
-    const target = registry.getBySessionId("session-1");
-    expect(target).toEqual({ chatId: 99 });
-  });
 });

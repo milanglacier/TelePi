@@ -41,6 +41,11 @@ function createMockSession(overrides: Partial<PiSessionService> = {}) {
 
 const defaultTarget: PiSessionContext = { chatId: 12345 };
 
+/** Advance far enough to flush the 1500ms edit debounce but stay under the 4500ms typing interval. */
+async function flushAsyncWork(): Promise<void> {
+  await vi.advanceTimersByTimeAsync(2000);
+}
+
 describe("autonomous handler", () => {
   it("starts and subscribes to autonomous events", () => {
     const api = createMockApi();
@@ -96,8 +101,8 @@ describe("autonomous handler", () => {
     callbacks.onAutonomousStart();
     callbacks.onAutonomousTextDelta("Hello ");
 
-    // Advance timers to allow the async send to complete
-    await vi.runAllTimersAsync();
+    // Advance past debounce timeout so the message is sent
+    await flushAsyncWork();
 
     expect(api.sendMessage).toHaveBeenCalledTimes(1);
     handler.stop();
@@ -122,14 +127,26 @@ describe("autonomous handler", () => {
 
     callbacks.onAutonomousStart();
     callbacks.onAutonomousTextDelta("Autonomous response");
-
-    await vi.runAllTimersAsync();
+    await flushAsyncWork();
 
     callbacks.onAutonomousEnd();
-    await vi.runAllTimersAsync();
+    await flushAsyncWork();
 
-    // Should have sent at least one message (the initial or final)
-    expect(api.sendMessage.mock.calls.length + api.editMessageText.mock.calls.length).toBeGreaterThanOrEqual(1);
+    // The final message should contain the accumulated text.
+    // sendTextMessage → api.sendMessage(chatId, text, ...)
+    // safeEditMessage → bot.api.editMessageText(chatId, messageId, text, ...)
+    const allCalls = [
+      ...api.sendMessage.mock.calls,
+      ...api.editMessageText.mock.calls,
+    ];
+    const messages = allCalls.map((call: any[]) => {
+      // sendMessage: text is call[1]; editMessageText: text is call[2]
+      if (call.length >= 3) return call[2];
+      return call[1];
+    });
+    const combinedText = messages.join(" ");
+    expect(combinedText).toContain("Autonomous response");
+
     handler.stop();
     vi.useRealTimers();
   });
@@ -153,20 +170,22 @@ describe("autonomous handler", () => {
     callbacks.onAutonomousStart();
     callbacks.onAutonomousToolStart("bash", "tool-1");
     callbacks.onAutonomousTextDelta("Result");
-    await vi.runAllTimersAsync();
+    await flushAsyncWork();
     callbacks.onAutonomousEnd();
-    await vi.runAllTimersAsync();
+    await flushAsyncWork();
 
-    // The final message should include tool summary
+    // In summary mode, the final text should include tool summary
     const allCalls = [
       ...api.sendMessage.mock.calls,
       ...api.editMessageText.mock.calls,
     ];
-    const messages = allCalls.map((call: any[]) => call[1]);
-
-    // In summary mode, the final text should include tool summary
+    const messages = allCalls.map((call: any[]) => {
+      if (call.length >= 3) return call[2];
+      return call[1];
+    });
     const combinedText = messages.join(" ");
     expect(combinedText).toContain("Result");
+
     handler.stop();
     vi.useRealTimers();
   });
@@ -190,14 +209,24 @@ describe("autonomous handler", () => {
     callbacks.onAutonomousStart();
     callbacks.onAutonomousToolStart("bash", "tool-1");
     callbacks.onAutonomousTextDelta("Running");
-    await vi.runAllTimersAsync();
+    await flushAsyncWork();
 
-    // Tool start sends a separate message
-    expect(api.sendMessage.mock.calls.length).toBeGreaterThanOrEqual(1);
+    // Tool start sends a dedicated message with the tool name.
+    // sendTextMessage → api.sendMessage(chatId, text, ...)
+    const toolStartCall = api.sendMessage.mock.calls.find(
+      (call: any[]) => call[1]?.includes?.("bash"),
+    );
+    expect(toolStartCall).toBeDefined();
 
     callbacks.onAutonomousToolEnd("tool-1", false);
-    callbacks.onAutonomousEnd();
-    await vi.runAllTimersAsync();
+    await flushAsyncWork();
+
+    // Tool end edits the tool start message with the result icon.
+    // safeEditMessage → bot.api.editMessageText(chatId, messageId, text, ...)
+    const toolEndEdit = api.editMessageText.mock.calls.find(
+      (call: any[]) => call[2]?.includes?.("✅"),
+    );
+    expect(toolEndEdit).toBeDefined();
 
     handler.stop();
     vi.useRealTimers();
@@ -223,15 +252,117 @@ describe("autonomous handler", () => {
     callbacks.onAutonomousToolStart("bash", "tool-1");
     callbacks.onAutonomousToolEnd("tool-1", false);
     callbacks.onAutonomousTextDelta("Done");
-    await vi.runAllTimersAsync();
+    await flushAsyncWork();
     callbacks.onAutonomousEnd();
-    await vi.runAllTimersAsync();
+    await flushAsyncWork();
 
-    // No tool messages should be sent
-    const toolMessages = api.sendMessage.mock.calls.filter(
-      (call: any[]) => call[1]?.includes?.("Running:") || call[1]?.includes?.("✅"),
+    // Only text-related messages should be sent; no tool messages.
+    const toolCalls = api.sendMessage.mock.calls.filter(
+      (call: any[]) => {
+        const text = call[1] ?? "";
+        return text.includes("🔧") || text.includes("✅") || text.includes("❌");
+      },
     );
-    expect(toolMessages.length).toBe(0);
+    expect(toolCalls.length).toBe(0);
+
+    // Text content should still be streamed
+    const allCalls = [
+      ...api.sendMessage.mock.calls,
+      ...api.editMessageText.mock.calls,
+    ];
+    const messages = allCalls.map((call: any[]) => {
+      if (call.length >= 3) return call[2];
+      return call[1];
+    });
+    const combinedText = messages.join(" ");
+    expect(combinedText).toContain("Done");
+
+    handler.stop();
+    vi.useRealTimers();
+  });
+
+  it("accumulates tool partial results via onAutonomousToolUpdate", async () => {
+    vi.useFakeTimers();
+    const api = createMockApi();
+    const bot = createMockBot(api);
+    const piSession = createMockSession();
+
+    const handler = createAutonomousHandler({
+      bot,
+      target: defaultTarget,
+      piSession,
+      toolVerbosity: "all",
+    });
+
+    handler.start();
+    const callbacks = (piSession as any).getAutonomousCallbacks();
+
+    callbacks.onAutonomousStart();
+    callbacks.onAutonomousToolStart("bash", "tool-1");
+    callbacks.onAutonomousToolUpdate("tool-1", "partial output");
+    callbacks.onAutonomousToolUpdate("tool-1", " more");
+    await flushAsyncWork();
+
+    callbacks.onAutonomousToolEnd("tool-1", false);
+    await flushAsyncWork();
+
+    // Tool end edit should include the accumulated partial result.
+    // safeEditMessage → bot.api.editMessageText(chatId, messageId, text, ...)
+    const toolEndEdit = api.editMessageText.mock.calls.find(
+      (call: any[]) => call[2]?.includes?.("partial output more"),
+    );
+    expect(toolEndEdit).toBeDefined();
+
+    handler.stop();
+    vi.useRealTimers();
+  });
+
+  it("sends tool error messages in errors-only verbosity mode", async () => {
+    vi.useFakeTimers();
+    const api = createMockApi();
+    const bot = createMockBot(api);
+    const piSession = createMockSession();
+
+    const handler = createAutonomousHandler({
+      bot,
+      target: defaultTarget,
+      piSession,
+      toolVerbosity: "errors-only" as ToolVerbosity,
+    });
+
+    handler.start();
+    const callbacks = (piSession as any).getAutonomousCallbacks();
+
+    callbacks.onAutonomousStart();
+
+    // Successful tool: no message in errors-only mode
+    callbacks.onAutonomousToolStart("ls", "tool-ok");
+    callbacks.onAutonomousToolEnd("tool-ok", false);
+
+    // Errored tool: should send a message
+    callbacks.onAutonomousToolStart("bash", "tool-err");
+    callbacks.onAutonomousToolEnd("tool-err", true);
+
+    await flushAsyncWork();
+
+    // sendTextMessage → api.sendMessage(chatId, text, options)
+    const errorCalls = api.sendMessage.mock.calls.filter(
+      (call: any[]) => {
+        const text = call[1] ?? "";
+        return text.includes("❌") && text.includes("bash");
+      },
+    );
+    expect(errorCalls.length).toBe(1);
+
+    // No success tool messages
+    const successCalls = api.sendMessage.mock.calls.filter(
+      (call: any[]) => {
+        const text = call[1] ?? "";
+        return text.includes("✅") && text.includes("ls");
+      },
+    );
+    expect(successCalls.length).toBe(0);
+
     handler.stop();
     vi.useRealTimers();
   });

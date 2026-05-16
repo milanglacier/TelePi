@@ -1,10 +1,12 @@
 import type { Bot, Context } from "grammy";
 
 import {
+  appendWithCap,
   buildStreamingPreview,
   formatToolSummaryLine,
-  isMessageNotModifiedError,
   renderMarkdownChunkWithinLimit,
+  renderToolEndMessage,
+  renderToolStartMessage,
   splitMarkdownForTelegram,
   stripAnsiEscapes,
   TOOL_OUTPUT_PREVIEW_LIMIT,
@@ -23,8 +25,9 @@ const AUTONOMOUS_EDIT_DEBOUNCE_MS = 1500;
 
 type ToolState = {
   toolName: string;
+  partialResult: string;
   messageId?: number;
-  finalStatus?: { text: string; fallbackText: string; parseMode?: string };
+  finalStatus?: { text: string; fallbackText: string; parseMode?: "HTML" };
 };
 
 export interface AutonomousHandlerDeps {
@@ -264,7 +267,49 @@ export function createAutonomousHandler(deps: AutonomousHandlerDeps): {
       return;
     }
 
-    toolStates.set(toolCallId, { toolName });
+    const state: ToolState = { toolName, partialResult: "" };
+    toolStates.set(toolCallId, state);
+
+    if (toolVerbosity !== "all") {
+      // errors-only mode: defer message until tool end (only on error)
+      return;
+    }
+
+    const messageText = renderToolStartMessage(toolName);
+
+    void (async () => {
+      const message = await sendTextMessage(bot.api, target, messageText.text, {
+        parseMode: messageText.parseMode,
+        fallbackText: messageText.fallbackText,
+      });
+      const currentState = toolStates.get(toolCallId);
+      if (!currentState) {
+        return;
+      }
+
+      currentState.messageId = message.message_id;
+      if (currentState.finalStatus) {
+        await safeEditMessage(bot, target, currentState.messageId, currentState.finalStatus.text, {
+          parseMode: currentState.finalStatus.parseMode,
+          fallbackText: currentState.finalStatus.fallbackText,
+        });
+      }
+    })().catch((error) => {
+      console.error(`Failed to send autonomous tool start message for ${toolName}`, error);
+    });
+  };
+
+  const onToolUpdate = (toolCallId: string, partialResult: string): void => {
+    if (toolVerbosity === "none" || toolVerbosity === "summary") {
+      return;
+    }
+
+    const state = toolStates.get(toolCallId);
+    if (!state || !partialResult) {
+      return;
+    }
+
+    state.partialResult = appendWithCap(state.partialResult, stripAnsiEscapes(partialResult), TOOL_OUTPUT_PREVIEW_LIMIT);
   };
 
   const onToolEnd = (toolCallId: string, isError: boolean): void => {
@@ -277,7 +322,36 @@ export function createAutonomousHandler(deps: AutonomousHandlerDeps): {
       return;
     }
 
-    toolStates.delete(toolCallId);
+    state.partialResult = stripAnsiEscapes(state.partialResult);
+    state.finalStatus = renderToolEndMessage(state.toolName, state.partialResult, isError);
+
+    if (toolVerbosity === "errors-only") {
+      if (!isError) {
+        return;
+      }
+
+      void sendTextMessage(bot.api, target, state.finalStatus.text, {
+        parseMode: state.finalStatus.parseMode,
+        fallbackText: state.finalStatus.fallbackText,
+      }).catch((error) => {
+        console.error(`Failed to send autonomous tool error message for ${state.toolName}`, error);
+      });
+      return;
+    }
+
+    // all verbosity mode: update the existing tool start message
+    if (!state.messageId) {
+      // The tool start message may still be in flight; finalStatus will be
+      // picked up by the sendTextMessage callback above.
+      return;
+    }
+
+    void safeEditMessage(bot, target, state.messageId, state.finalStatus.text, {
+      parseMode: state.finalStatus.parseMode,
+      fallbackText: state.finalStatus.fallbackText,
+    }).catch((error) => {
+      console.error(`Failed to update autonomous tool message for ${state.toolName}`, error);
+    });
   };
 
   const onEnd = (): void => {
@@ -291,6 +365,7 @@ export function createAutonomousHandler(deps: AutonomousHandlerDeps): {
       onAutonomousStart: onStart,
       onAutonomousTextDelta: onTextDelta,
       onAutonomousToolStart: onToolStart,
+      onAutonomousToolUpdate: onToolUpdate,
       onAutonomousToolEnd: onToolEnd,
       onAutonomousEnd: onEnd,
     });

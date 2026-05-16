@@ -460,7 +460,7 @@ export function stripHtml(text: string): string {
 }
 
 export function stripAnsiEscapes(text: string): string {
-  return text.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "");
+  return text.replace(/\x1b\[[0-9;?]*[A-HJKSTfhilmnpqrsu]/g, "");
 }
 
 export function getWorkspaceShortName(workspace: string): string {
