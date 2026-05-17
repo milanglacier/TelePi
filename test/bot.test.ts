@@ -1,6 +1,6 @@
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { readFile, unlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { vi } from "vitest";
 
@@ -1508,6 +1508,65 @@ describe("createBot", () => {
 
     await bot.handleUpdate(createCallbackUpdate("newws_7"));
     expect(pi.service.newSession).toHaveBeenCalledWith("/workspace/W7");
+  });
+
+  it("creates session directly from /new <path> without showing a picker", async () => {
+    const { bot, pi, api } = setupBot();
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/new /tmp" } }));
+
+    expect(pi.service.newSession).toHaveBeenCalledWith("/tmp");
+    expect(pi.service.listWorkspaces).not.toHaveBeenCalled();
+    // No picker keyboard should be sent
+    expect(api.sendMessage.mock.calls[0]?.[2]?.reply_markup).toBeUndefined();
+    expect(api.sendMessage.mock.calls[0]?.[1]).toContain("New session created.");
+  });
+
+  it("shows error when /new <path> points to a nonexistent directory", async () => {
+    const { bot, api, pi } = setupBot();
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/new /tmp/telepi-test-nonexistent-abc123" } }));
+
+    expect(api.sendMessage.mock.calls[0]?.[1]).toContain(
+      "Workspace not found: /tmp/telepi-test-nonexistent-abc123",
+    );
+    expect(pi.service.newSession).not.toHaveBeenCalled();
+  });
+
+  it("shows error when /new <path> points to a file instead of a directory", async () => {
+    const { bot, api, pi } = setupBot();
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/new /etc/hostname" } }));
+
+    expect(api.sendMessage.mock.calls[0]?.[1]).toContain("Path is not a directory: /etc/hostname");
+    expect(pi.service.newSession).not.toHaveBeenCalled();
+  });
+
+  it("expands tilde in /new <path> and creates session in the resolved directory", async () => {
+    const { bot, pi, api } = setupBot();
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/new ~" } }));
+
+    const callArg = vi.mocked(pi.service.newSession).mock.calls[0]?.[0] as string | undefined;
+    expect(callArg).toBeDefined();
+    // The resolved path should NOT contain a literal ~
+    expect(callArg).not.toContain("~");
+    // Should be the home directory
+    expect(callArg).toBe(homedir());
+    expect(api.sendMessage.mock.calls[0]?.[1]).toContain("New session created.");
+  });
+
+  it("resolves relative paths against cwd for /new <relative>", async () => {
+    const { bot, pi, api } = setupBot();
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/new ./src" } }));
+
+    const callArg = vi.mocked(pi.service.newSession).mock.calls[0]?.[0] as string | undefined;
+    expect(callArg).toBeDefined();
+    // Should be an absolute path (resolved against cwd)
+    expect(path.isAbsolute(callArg!)).toBe(true);
+    expect(callArg).toContain(process.cwd());
+    expect(api.sendMessage.mock.calls[0]?.[1]).toContain("New session created.");
   });
 
   it("handles /handback and blocks it when unavailable or busy", async () => {

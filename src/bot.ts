@@ -697,7 +697,7 @@ export function createBot(config: TelePiConfig, sessionRegistry: PiSessionRegist
       return;
     }
 
-    await handleNewCommand(ctx, target);
+    await handleNewCommand(ctx, target, ctx.message?.text);
   });
 
   bot.command("handback", async (ctx) => {

@@ -1,7 +1,11 @@
+import { existsSync, statSync } from "node:fs";
+import path from "node:path";
+
 import type { Context } from "grammy";
 import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 
 import { escapeHTML } from "../../format.js";
+import { expandHomePath } from "../../paths.js";
 import type { PiSessionContext, PiSessionInfo, PiSessionService } from "../../pi-session.js";
 import type { KeyboardItem } from "../keyboard.js";
 import { getWorkspaceShortName, renderFailedText, renderPrefixedError, renderSessionInfoHTML, renderSessionInfoPlain, trimLine } from "../message-rendering.js";
@@ -136,7 +140,7 @@ export function createSessionCommandHandlers(deps: {
     }, target);
   };
 
-  const handleNewCommand = async (ctx: Context, target: PiSessionContext): Promise<void> => {
+  const handleNewCommand = async (ctx: Context, target: PiSessionContext, commandText?: string): Promise<void> => {
     const contextKey = getContextKey(target);
 
     if (isBusy(target)) {
@@ -147,6 +151,54 @@ export function createSessionCommandHandlers(deps: {
     }
 
     const piSession = await getOrCreateSession(target);
+    const rawText = commandText ?? "";
+    const workspaceArg = rawText.replace(/^\/new(?:@\w+)?\s*/, "").trim();
+
+    if (workspaceArg) {
+      const resolvedPath = path.isAbsolute(expandHomePath(workspaceArg))
+        ? expandHomePath(workspaceArg)
+        : path.resolve(process.cwd(), expandHomePath(workspaceArg));
+
+      if (!existsSync(resolvedPath)) {
+        await safeReply(ctx, escapeHTML(`Workspace not found: ${resolvedPath}`), {
+          fallbackText: `Workspace not found: ${resolvedPath}`,
+        }, target);
+        return;
+      }
+
+      if (!statSync(resolvedPath).isDirectory()) {
+        await safeReply(ctx, escapeHTML(`Path is not a directory: ${resolvedPath}`), {
+          fallbackText: `Path is not a directory: ${resolvedPath}`,
+        }, target);
+        return;
+      }
+
+      try {
+        const { info, created } = await piSession.newSession(resolvedPath);
+        if (!created) {
+          await safeReply(ctx, escapeHTML("New session was cancelled."), {
+            fallbackText: "New session was cancelled.",
+          }, target);
+          return;
+        }
+
+        await refreshChatScopedCommands(target, piSession);
+        clearContextPickers(contextKey);
+        clearContextPromptMemory(target);
+        const plainText = `New session created.\n\n${renderSessionInfoPlain(info)}`;
+        const html = `<b>New session created.</b>\n\n${renderSessionInfoHTML(info)}`;
+        await safeReply(ctx, html, { fallbackText: plainText }, target);
+        await surfaceStartupErrorDiagnostics(ctx, target, info);
+      } catch (error) {
+        const failure = renderFailedText(error);
+        await safeReply(ctx, failure.text, {
+          fallbackText: failure.fallbackText,
+          parseMode: failure.parseMode,
+        }, target);
+      }
+      return;
+    }
+
     const workspaces = await piSession.listWorkspaces();
 
     if (workspaces.length <= 1) {
