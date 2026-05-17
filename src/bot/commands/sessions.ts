@@ -1,11 +1,10 @@
 import { existsSync, statSync } from "node:fs";
-import path from "node:path";
 
 import type { Context } from "grammy";
 import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 
 import { escapeHTML } from "../../format.js";
-import { expandHomePath } from "../../paths.js";
+import { resolvePathFromCwd } from "../../paths.js";
 import type { PiSessionContext, PiSessionInfo, PiSessionService } from "../../pi-session.js";
 import type { KeyboardItem } from "../keyboard.js";
 import { getWorkspaceShortName, renderFailedText, renderPrefixedError, renderSessionInfoHTML, renderSessionInfoPlain, trimLine } from "../message-rendering.js";
@@ -155,9 +154,7 @@ export function createSessionCommandHandlers(deps: {
     const workspaceArg = rawText.replace(/^\/new(?:@\w+)?\s*/, "").trim();
 
     if (workspaceArg) {
-      const resolvedPath = path.isAbsolute(expandHomePath(workspaceArg))
-        ? expandHomePath(workspaceArg)
-        : path.resolve(process.cwd(), expandHomePath(workspaceArg));
+      const resolvedPath = resolvePathFromCwd(workspaceArg);
 
       if (!existsSync(resolvedPath)) {
         await safeReply(ctx, escapeHTML(`Workspace not found: ${resolvedPath}`), {

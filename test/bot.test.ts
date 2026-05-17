@@ -1536,9 +1536,9 @@ describe("createBot", () => {
   it("shows error when /new <path> points to a file instead of a directory", async () => {
     const { bot, api, pi } = setupBot();
 
-    await bot.handleUpdate(createTestUpdate({ message: { text: "/new /etc/hostname" } }));
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/new /dev/null" } }));
 
-    expect(api.sendMessage.mock.calls[0]?.[1]).toContain("Path is not a directory: /etc/hostname");
+    expect(api.sendMessage.mock.calls[0]?.[1]).toContain("Path is not a directory: /dev/null");
     expect(pi.service.newSession).not.toHaveBeenCalled();
   });
 
