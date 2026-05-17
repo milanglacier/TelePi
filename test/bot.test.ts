@@ -1557,16 +1557,23 @@ describe("createBot", () => {
   });
 
   it("resolves relative paths against cwd for /new <relative>", async () => {
-    const { bot, pi, api } = setupBot();
+    const tempDir = mkdtempSync(path.join(process.cwd(), "telepi-test-new-"));
+    const relativePath = path.relative(process.cwd(), tempDir);
 
-    await bot.handleUpdate(createTestUpdate({ message: { text: "/new ./src" } }));
+    try {
+      const { bot, pi, api } = setupBot();
 
-    const callArg = vi.mocked(pi.service.newSession).mock.calls[0]?.[0] as string | undefined;
-    expect(callArg).toBeDefined();
-    // Should be an absolute path (resolved against cwd)
-    expect(path.isAbsolute(callArg!)).toBe(true);
-    expect(callArg).toContain(process.cwd());
-    expect(api.sendMessage.mock.calls[0]?.[1]).toContain("New session created.");
+      await bot.handleUpdate(createTestUpdate({ message: { text: `/new ${relativePath}` } }));
+
+      const callArg = vi.mocked(pi.service.newSession).mock.calls[0]?.[0] as string | undefined;
+      expect(callArg).toBeDefined();
+      // Should be an absolute path (resolved against cwd)
+      expect(path.isAbsolute(callArg!)).toBe(true);
+      expect(callArg).toBe(tempDir);
+      expect(api.sendMessage.mock.calls[0]?.[1]).toContain("New session created.");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("handles /handback and blocks it when unavailable or busy", async () => {

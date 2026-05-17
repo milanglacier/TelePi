@@ -139,6 +139,22 @@ export function createSessionCommandHandlers(deps: {
     }, target);
   };
 
+  const handleNewSessionSuccess = async (
+    ctx: Context,
+    target: PiSessionContext,
+    piSession: PiSessionService,
+    contextKey: string,
+    info: PiSessionInfo,
+  ): Promise<void> => {
+    await refreshChatScopedCommands(target, piSession);
+    clearContextPickers(contextKey);
+    clearContextPromptMemory(target);
+    const plainText = `New session created.\n\n${renderSessionInfoPlain(info)}`;
+    const html = `<b>New session created.</b>\n\n${renderSessionInfoHTML(info)}`;
+    await safeReply(ctx, html, { fallbackText: plainText }, target);
+    await surfaceStartupErrorDiagnostics(ctx, target, info);
+  };
+
   const handleNewCommand = async (ctx: Context, target: PiSessionContext, commandText?: string): Promise<void> => {
     const contextKey = getContextKey(target);
 
@@ -178,14 +194,7 @@ export function createSessionCommandHandlers(deps: {
           }, target);
           return;
         }
-
-        await refreshChatScopedCommands(target, piSession);
-        clearContextPickers(contextKey);
-        clearContextPromptMemory(target);
-        const plainText = `New session created.\n\n${renderSessionInfoPlain(info)}`;
-        const html = `<b>New session created.</b>\n\n${renderSessionInfoHTML(info)}`;
-        await safeReply(ctx, html, { fallbackText: plainText }, target);
-        await surfaceStartupErrorDiagnostics(ctx, target, info);
+        await handleNewSessionSuccess(ctx, target, piSession, contextKey, info);
       } catch (error) {
         const failure = renderFailedText(error);
         await safeReply(ctx, failure.text, {
@@ -207,14 +216,7 @@ export function createSessionCommandHandlers(deps: {
           }, target);
           return;
         }
-
-        await refreshChatScopedCommands(target, piSession);
-        clearContextPickers(contextKey);
-        clearContextPromptMemory(target);
-        const plainText = `New session created.\n\n${renderSessionInfoPlain(info)}`;
-        const html = `<b>New session created.</b>\n\n${renderSessionInfoHTML(info)}`;
-        await safeReply(ctx, html, { fallbackText: plainText }, target);
-        await surfaceStartupErrorDiagnostics(ctx, target, info);
+        await handleNewSessionSuccess(ctx, target, piSession, contextKey, info);
       } catch (error) {
         const failure = renderFailedText(error);
         await safeReply(ctx, failure.text, {
