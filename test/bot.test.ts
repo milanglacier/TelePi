@@ -1576,6 +1576,36 @@ describe("createBot", () => {
     }
   });
 
+  it("shows cancelled message when /new <path> newSession returns created: false", async () => {
+    const { bot, api } = setupBot({
+      piSessionOverrides: {
+        newSession: vi.fn().mockResolvedValue({
+          info: {
+            sessionId: "cancelled-explicit",
+            sessionFile: "/tmp/cancelled-explicit.jsonl",
+            workspace: "/tmp",
+            model: "anthropic/claude-sonnet-4-5",
+          },
+          created: false,
+        }),
+      },
+    });
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/new /tmp" } }));
+    expect(api.sendMessage.mock.calls[0]?.[1]).toContain("New session was cancelled.");
+  });
+
+  it("renders error when /new <path> newSession throws", async () => {
+    const { bot, api } = setupBot({
+      piSessionOverrides: {
+        newSession: vi.fn().mockRejectedValue(new Error("explicit new failed")),
+      },
+    });
+
+    await bot.handleUpdate(createTestUpdate({ message: { text: "/new /tmp" } }));
+    expect(api.sendMessage.mock.calls[0]?.[1]).toContain("explicit new failed");
+  });
+
   it("handles /handback and blocks it when unavailable or busy", async () => {
     const ok = setupBot();
     await ok.bot.handleUpdate(createTestUpdate({ message: { text: "/handback" } }));
