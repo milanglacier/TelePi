@@ -1,32 +1,74 @@
 # TelePi
 
-TelePi is a Telegram bridge for the [Pi coding agent](https://github.com/badlogic/pi-mono) SDK. It lets you continue Pi sessions from Telegram — hand off from the CLI, keep working on your phone, and hand back when you're at your desk. Send a voice message and TelePi will transcribe it and feed it straight into Pi.
+**Run your Pi coding agent from Telegram: voice prompts, screenshots, session handoff, and terminal handback.**
+
+TelePi is a Telegram bridge for the [Pi coding agent](https://github.com/badlogic/pi-mono). It runs locally on your machine, opens real Pi sessions in your repositories, lets you continue from your phone, and hands the exact same session back to the terminal when you return.
+
+**Who this is for:** developers already using Pi who want a safe mobile control surface for coding-agent work: reply from the train, send a screenshot, dictate a prompt, watch progress, then resume in the CLI without losing context.
+
+Early open-source release: **80+ stars, 13 forks, and hundreds of npm downloads**. Current npm release: `@futurelab-studio/telepi` **v0.4.2**, with macOS `launchd`, Linux `systemd --user`, image prompts, prompt inbox, local/cloud voice transcription, and Pi command bridging. Read the [Futurelab TelePi deep dive](https://futurelab.studio/blog/telepi-telegram-remote-control-for-pi/) for the longer story.
+
+> **Demo placeholder:** GIF coming soon. The core loop is: Pi CLI `/handoff` → Telegram text/voice/image prompt → `/handback` → resume the same Pi session in your terminal.
+
+## Try it in 5 minutes
+
+You need:
+
+- **Node.js 20+**
+- A Telegram bot token from [@BotFather](https://t.me/BotFather)
+- Your numeric Telegram user ID for the allowlist
+- Pi installed and authenticated locally (`~/.pi/agent/auth.json` exists after a working Pi login)
+
+Install the npm package and run the guided setup:
+
+```bash
+npm install -g @futurelab-studio/telepi
+telepi setup
+telepi status
+```
+
+`telepi setup` asks for your bot token, allowed Telegram user IDs, and default workspace. It installs the local service for your platform and the Pi `/handoff` extension.
+
+**Success checkpoint:** open Telegram and send `/start` to your bot. You should see your workspace/session status and voice backend status. If not, jump to [Troubleshooting activation blockers](#troubleshooting-activation-blockers).
+
+## Your first TelePi session
+
+1. Start or open a Pi session in a repository.
+2. Run `/handoff` from Pi.
+3. Open Telegram and find your bot.
+4. Send a text prompt, voice message, or screenshot/photo.
+5. Use `/handback` to resume the same session in your terminal.
+
+## Security model
+
+TelePi gives Telegram access to a coding agent, so it is designed to stay private by default:
+
+- **Telegram user allowlist:** only IDs in `TELEGRAM_ALLOWED_USER_IDS` can interact with the bot.
+- **Workspace-scoped execution:** Pi tools are created for the active workspace and re-scoped when you switch sessions.
+- **Local user service:** installed mode runs under your own macOS/Linux user account, not as a public server.
+- **No public bot access when configured correctly:** anyone else who discovers the bot is rejected unless their Telegram user ID is allowlisted.
+- **Docker support:** run TelePi in a non-root container with explicit read/write mounts if you want stronger filesystem isolation.
 
 ## Features
 
 - **Bi-directional hand-off**: Move sessions CLI → Telegram (`/handoff`) and back (`/handback`)
 - **Per-chat/topic sessions**: Every Telegram chat or forum topic gets its own Pi session, picker state, and retry history
 - **Voice and image messages**: Send voice/audio for transcription, or photos/image documents as Pi image inputs
-- **Local or cloud transcription**: [Parakeet CoreML](https://github.com/badlogic/parakeet-coreml) on Apple Silicon, [Sherpa-ONNX Parakeet](https://k2-fsa.github.io/sherpa/onnx/) for Intel Macs (and as a CPU fallback), or OpenAI Whisper in the cloud
+- **Local or cloud transcription**: [Parakeet CoreML](https://github.com/sebastian-software/parakeet-coreml) on Apple Silicon, [Sherpa-ONNX Parakeet](https://k2-fsa.github.io/sherpa/onnx/) for Intel Macs (and as a CPU fallback), or OpenAI Whisper in the cloud
 - **Session tree navigation**: Browse, branch, and label your Pi session history with `/tree`, `/branch`, `/label`
 - **Cross-workspace sessions**: Browse and switch between sessions from any project
 - **Model switching**: Change AI models on the fly via `/model`
 - **Workspace-aware `/new`**: Create sessions in any known project workspace
 - **Pi slash-command bridge**: Run discovered Pi prompt templates, skills, and extension commands from Telegram, browse them with the paginated `/commands` picker, and surface Telegram-compatible ones in the native slash-command menu
+- **External prompt inbox**: Let cron jobs, mail filters, webhooks, or log watchers drop `.txt` prompts into a watched directory
 - **Helpful recovery commands**: `/help` for quick usage guidance and `/retry` to resend the last prompt in the current chat/topic
-- **Extension dialog support**: Pi extension commands can now ask for Telegram-native selects, confirms, and text input mid-command
+- **Extension dialog support**: Pi extension commands can ask for Telegram-native selects, confirms, and text input mid-command
 - **Native Telegram UX**: Topic-safe inline keyboards, typing indicators, HTML-formatted responses, friendly user-facing errors, auto-retry on rate limits
 - **Security**: Telegram user allowlist, workspace-scoped tools, Docker support
 
-## Prerequisites
+## Full setup details
 
-- Node.js 20+
-- A Telegram bot token from [@BotFather](https://t.me/BotFather)
-- Pi installed locally with working credentials in `~/.pi/agent/auth.json`
-
-## Quickstart (npm global install)
-
-This is the main install path for TelePi on macOS (`launchd`) and Linux (`systemd --user`).
+The npm global install is the main path for TelePi on macOS (`launchd`) and Linux (`systemd --user`).
 
 1. Install TelePi globally:
    ```bash
@@ -56,7 +98,7 @@ This is the main install path for TelePi on macOS (`launchd`) and Linux (`system
    - on Linux, install/update `~/.config/systemd/user/telepi.service` and run `systemctl --user daemon-reload && systemctl --user enable --now telepi.service`
    - install the Pi `/handoff` extension at `~/.pi/agent/extensions/telepi-handoff.ts`
 
-   If you run setup non-interactively, you must either pass all three positional values or already have them configured; TelePi now fails clearly instead of writing placeholder values.
+   If you run setup non-interactively, you must either pass all three positional values or already have them configured; TelePi fails clearly instead of writing placeholder values.
 3. Verify the installed config at `~/.config/telepi/config.env` with your real values:
    ```dotenv
    TELEGRAM_BOT_TOKEN=123456789:AAFf_real_token_from_botfather
@@ -74,6 +116,32 @@ This is the main install path for TelePi on macOS (`launchd`) and Linux (`system
 5. Open Telegram and send `/start` to your bot.
 
 Rerunning `telepi setup` after upgrades is safe; it refreshes the service unit and extension while preserving your config. After setup, `/handoff` automatically reuses the installed `launchd` service on macOS or `systemd --user` service on Linux by default.
+
+## Troubleshooting activation blockers
+
+### How do I get a Telegram bot token?
+
+Open [@BotFather](https://t.me/BotFather), send `/newbot`, choose a name and username, then copy the token into `telepi setup` as `TELEGRAM_BOT_TOKEN`.
+
+### How do I find my Telegram user ID?
+
+Message a helper bot such as [@userinfobot](https://t.me/userinfobot) and copy the numeric ID into `TELEGRAM_ALLOWED_USER_IDS`. Use comma-separated IDs for multiple people, for example `123456789,987654321`.
+
+### Bot does not respond
+
+Run `telepi status` first. Then check that the token is correct, your numeric user ID is allowlisted, you messaged the right bot, and you do not have a second TelePi process polling the same token. On macOS, logs are in `~/Library/Logs/TelePi/`; on Linux, use `journalctl --user -u telepi.service -f`.
+
+### Pi auth missing
+
+Start Pi locally once and complete authentication before using TelePi. TelePi expects Pi credentials under `~/.pi/agent/auth.json` and sessions under `~/.pi/agent/sessions/`.
+
+### Service not running
+
+Run `telepi status`. On macOS, restart the LaunchAgent with `launchctl kickstart -k gui/$UID/com.telepi`. On Linux, run `systemctl --user status telepi.service` and `systemctl --user restart telepi.service`; on headless systems you may also need `loginctl enable-linger "$USER"`.
+
+### Voice transcription not working
+
+Send `/start` and check the voice backend status. Local transcription needs `ffmpeg` plus either `parakeet-coreml` on Apple Silicon or `sherpa-onnx-node` with `SHERPA_ONNX_MODEL_DIR` for Intel/CPU fallback. Cloud transcription needs `OPENAI_API_KEY` in `~/.config/telepi/config.env`. See [Voice and Image Messages](#voice-and-image-messages) for setup details.
 
 ## Development from Source
 
